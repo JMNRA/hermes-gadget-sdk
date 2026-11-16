@@ -2112,8 +2112,7 @@ void App::cancel_turn() {
 
 void App::on_mic_samples(const int16_t* samples, size_t count) {
   if (hardware_check_ == HardwareCheck::Microphone) {
-    level_ = level_percent(rms(samples, count));
-    update_model();
+    mic_check_level(samples, count);
     return;
   }
   if (mode_ != Mode::Listening || count == 0) return;

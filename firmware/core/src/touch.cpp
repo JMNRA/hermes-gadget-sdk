@@ -150,6 +150,14 @@ void TouchGestures::update(bool touching, int x, int y, uint32_t now_ms) {
         state_ = State::Swipe;
         press(Button::Cancel);
       } else if (std::abs(dx) > cfg_.slop_px || std::abs(dy) > cfg_.slop_px) {
+        // An open settings list whose rows are inert (a hardware check is running) still scrolls
+        // under a drag: the check is stopped by a tap, and the way out of it must stay reachable.
+        if (app_.settings_open() && !app_.settings_list_live() && std::abs(dy) >= std::abs(dx)) {
+          state_ = State::ListDrag;
+          app_.settings_press(x0_, y0_);
+          app_.settings_drag(x, y);
+          break;
+        }
         // Neither a hold nor a downward swipe yet: one from right to left may open the profile
         // grid; wait for a clear swipe, else ignore.
         if (dx < 0 && std::abs(dx) >= std::abs(dy) && !from_clock_ && app_.profile_swipe_opens()) {

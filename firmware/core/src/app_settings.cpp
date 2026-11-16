@@ -8,6 +8,18 @@
 
 namespace hg {
 
+namespace {
+// A microphone check's meter, at most one new reading each tenth of a second: a louder block
+// takes the screen at once, and the peak then lets go four points at a time (about two and a
+// half seconds from full scale to nothing).
+constexpr uint32_t kCheckMeterStepMs = 100;
+constexpr uint8_t kCheckMeterRelease = 4;
+// A check that sees no progress for this long ends itself, as if the user had stopped it.
+constexpr uint32_t kCheckIdleMs = 30000;
+// A microphone that sends no samples for this long has stopped working: its check ends too.
+constexpr uint32_t kCheckSilentMicMs = 2000;
+}  // namespace
+
 bool App::settings_hold_live() const {
   return !prompt_showing() && !ota_busy() && !wifi_setup_open() && !phone_pairing_ && !alarm_;
 }
@@ -67,11 +79,36 @@ bool App::open_settings() {
   return true;
 }
 
+void App::start_hardware_check(HardwareCheck kind) {
+  hardware_check_ = kind;
+  check_level_ = 0;
+  check_progress_at_ = now();
+  // One step back, so the first samples of a microphone check reach the screen at once.
+  check_level_at_ = check_progress_at_ - kCheckMeterStepMs;
+}
+
 void App::stop_hardware_check() {
   if (hardware_check_ == HardwareCheck::Microphone && hal_.mic) hal_.mic->stop();
   if (hardware_check_ == HardwareCheck::Speaker && hal_.speaker) hal_.speaker->abort();
   hardware_check_ = HardwareCheck::None;
+  check_level_ = 0;
+  check_level_at_ = 0;
+  check_progress_at_ = 0;
   level_ = 0;
+}
+
+// A running microphone check's level: fast attack, slow release, and a bounded repaint rate.
+void App::mic_check_level(const int16_t* samples, size_t count) {
+  if (count == 0) return;  // nothing arrived: no progress, and no reading to show
+  const uint32_t t = now();
+  check_progress_at_ = t;  // samples are this check's progress: the watchdog waits for them
+  const uint8_t reading = level_percent(rms(samples, count));
+  if (reading > check_level_) check_level_ = reading;    // a louder block shows at once
+  if (t - check_level_at_ < kCheckMeterStepMs) return;  // at most ten readings a second
+  check_level_at_ = t;
+  level_ = check_level_;
+  check_level_ = check_level_ > kCheckMeterRelease ? static_cast<uint8_t>(check_level_ - kCheckMeterRelease) : 0;
+  update_model();
 }
 
 void App::close_settings() {
@@ -89,9 +126,20 @@ void App::close_settings() {
 
 void App::settings_input(Button button, bool pressed) {
   if (hardware_check_ == HardwareCheck::Inputs) {
+    // A board whose screen is its only control has no button to report here: the press that
+    // would name one leaves the check instead, on its release, so that release cannot start
+    // the check again.
+    if (profile_.touch_screen && button == Button::Talk) {
+      if (!pressed) {
+        stop_hardware_check();
+        check_result_ = tr(i18n::Msg::CheckStopped);
+      }
+      return;
+    }
     if (pressed) {
       const char* labels[] = {"TALK", "CANCEL", "UP", "DOWN"};
       check_result_ = tr(i18n::Msg::ButtonPressed, {labels[static_cast<unsigned>(button)]});
+      check_progress_at_ = now();  // a pressed control is progress: the check goes on
       return;
     }
     if (button != Button::Cancel) return;
@@ -112,6 +160,8 @@ void App::settings_input(Button button, bool pressed) {
   }
   if (button != Button::Talk || pressed) return;
   if (hardware_check_ != HardwareCheck::None) {
+    // On the release: the press has always done nothing here, and stopping a check on it
+    // would leave this release to start the same check again.
     stop_hardware_check();
     check_result_ = tr(i18n::Msg::CheckStopped);
     return;
@@ -141,7 +191,7 @@ void App::settings_input(Button button, bool pressed) {
       console("set profile_grid " + std::to_string(profile_grid_ == 4 ? 6 : profile_grid_ == 6 ? 9 : profile_grid_ == 9 ? 16 : 4));
       break;
     case Menu::Microphone:
-      if (hal_.mic && hal_.mic->start(profile_.mic_rate)) hardware_check_ = HardwareCheck::Microphone;
+      if (hal_.mic && hal_.mic->start(profile_.mic_rate)) start_hardware_check(HardwareCheck::Microphone);
       else check_result_ = tr(i18n::Msg::MicUnavailable);
       break;
     case Menu::Speaker:
@@ -152,17 +202,17 @@ void App::settings_input(Button button, bool pressed) {
         for (size_t i = 0; i < tone.size(); ++i) tone[i] = (i / half_period) % 2 ? 900 : -900;
         hal_.speaker->write(tone.data(), tone.size());
         hal_.speaker->end();
-        hardware_check_ = HardwareCheck::Speaker;
+        start_hardware_check(HardwareCheck::Speaker);
         check_result_ = tr(i18n::Msg::ListenForTone);
       } else check_result_ = tr(i18n::Msg::SpeakerUnavailable);
       break;
     case Menu::Display:
-      if (hal_.display) hardware_check_ = HardwareCheck::Display;
+      if (hal_.display) start_hardware_check(HardwareCheck::Display);
       else check_result_ = tr(i18n::Msg::DisplayUnavailable);
       break;
     case Menu::Inputs:
-      hardware_check_ = HardwareCheck::Inputs;
-      check_result_ = tr(i18n::Msg::InputCheckRunning);
+      start_hardware_check(HardwareCheck::Inputs);
+      check_result_ = tr(profile_.touch_screen ? i18n::Msg::InputCheckRunningTouch : i18n::Msg::InputCheckRunning);
       break;
     case Menu::IdleTimer: {
       const uint32_t seconds = screen_timeout_ms_ / 1000;
@@ -281,6 +331,22 @@ void App::settings_tick() {
     check_result_ = tr(i18n::Msg::ToneFinished);
     update_model();
   }
+  // The checks that wait on the user are bounded: one with no progress of its own stops itself,
+  // and a microphone that sends nothing stops sooner. Both say what a check stopped by hand
+  // says, so the screen never reads as a check that will never end. The speaker check is not
+  // one of these: it ends with its tone.
+  const bool bounded = hardware_check_ == HardwareCheck::Microphone ||
+                       hardware_check_ == HardwareCheck::Display || hardware_check_ == HardwareCheck::Inputs;
+  if (bounded) {
+    const uint32_t t = now();
+    const bool silent_mic = hardware_check_ == HardwareCheck::Microphone && t - check_progress_at_ >= kCheckSilentMicMs;
+    if (silent_mic || t - check_progress_at_ >= kCheckIdleMs) {
+      if (silent_mic) log(LogLevel::Info, "microphone check stopped: no samples");
+      stop_hardware_check();
+      check_result_ = tr(i18n::Msg::CheckStopped);
+      update_model();
+    }
+  }
 }
 
 bool App::battery_readable() const {
@@ -297,6 +363,10 @@ void App::settings_model() {
   const std::string talk = control(profile_.talk_label);
   m.hint = profile_.touch_screen ? std::string(tr(Msg::SettingsHintTouch))
                                 : tr(Msg::SettingsHintButtons, {talk, control(profile_.cancel_label)});
+  // A running check says how it ends, so the screen never reads as a dead end.
+  if (hardware_check_ != HardwareCheck::None)
+    m.hint = profile_.touch_screen ? std::string(tr(Msg::CheckHintTouch))
+                                   : tr(Msg::CheckHintButtons, {talk, control(profile_.cancel_label)});
   // Every item the board offers is a row; the selected one also fills detail and body.
   m.settings.clear();
   m.settings_sel = 0;
@@ -425,7 +495,9 @@ void App::settings_press(int x, int y) {
 }
 
 void App::settings_drag(int x, int y) {
-  if (!settings_list_live()) return;
+  // A running check leaves the rows inert (settings_list_live), but the list itself still
+  // scrolls under the finger: the way out stays reachable.
+  if (!ui_ || !settings_open()) return;
   if (sliding_ && menu_ != slide_item_) {  // a knob or a key moved the selection: the slide ends unsaved,
     slide_level_ = -1;                      // and the rest of this drag does nothing
   } else if (sliding_) {
@@ -521,7 +593,7 @@ void App::settings_item(Menu item, UiModel& m) const {
       break;
     case Menu::Inputs:
       m.detail = tr(Msg::InputCheck);
-      m.body = tr(Msg::InputCheckIntro);
+      m.body = tr(profile_.touch_screen ? Msg::InputCheckIntroTouch : Msg::InputCheckIntro);
       break;
     case Menu::Camera:
       m.detail = tr(Msg::Camera);

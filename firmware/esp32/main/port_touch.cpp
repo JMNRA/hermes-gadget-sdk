@@ -28,6 +28,9 @@ constexpr uint32_t kDozePollMs = 50;
 // Dozing with INT armed as a wake source: the sleep exit hook and nudge() end the wait, so the
 // task needs no poll of its own and the CPU stays in light sleep between Wi-Fi beacons.
 constexpr uint32_t kArmedDozeWaitMs = 1000;
+// A lift that does not fit the event queue is posted again this many times before the touch is
+// forgotten: a lift the app never sees would keep the gesture pressed for good.
+constexpr int kLiftPostTries = 3;
 constexpr uint8_t kTca9554Input = 0x00;
 constexpr uint8_t kCstAck = 0xAB;
 
@@ -530,10 +533,31 @@ void TouchInput::task(void* arg) {
   auto* self = static_cast<TouchInput*>(arg);
   self->task_ = xTaskGetCurrentTaskHandle();
   bool was_touching = false, key_down = false;
+  // A lift the queue refused, waiting for the next loop to carry it (kLiftPostTries).
+  int lift_tries = 0;
   hg::Cst816Fault fault;
   TouchSample last{};
   for (;;) {
     self->last_loop_us_.store(esp_timer_get_time(), std::memory_order_relaxed);
+    // The lift is the only event that ends a gesture. The managed drivers (GT911 and the rest)
+    // take a refused lift as delivered, so nothing would post it again and the gesture would stay
+    // pressed: re-post it here, a bounded number of times. If it still does not fit, forget the
+    // touch so the next sample starts from Idle instead of continuing a drag nobody is making.
+    if (lift_tries > 0) {
+      last.touching = false;
+      if (events::post(EventType::Touch, &last, sizeof(last))) {
+        self->posted_.fetch_add(1, std::memory_order_relaxed);
+        was_touching = false;
+        lift_tries = 0;
+      } else {
+        self->post_drops_.fetch_add(1, std::memory_order_relaxed);
+        if (lift_tries++ >= kLiftPostTries) {
+          ESP_LOGW(TAG, "touch lift dropped %d times; waiting for the next touch", kLiftPostTries);
+          was_touching = false;
+          lift_tries = 0;
+        }
+      }
+    }
     TouchSample s{};
     bool read = false, ok = false;
     if (self->has_touch() && self->may_read(was_touching)) {
@@ -556,10 +580,12 @@ void TouchInput::task(void* arg) {
       if (s.touching || was_touching) {
         const bool posted = events::post(EventType::Touch, &s, sizeof(s));
         (posted ? self->posted_ : self->post_drops_).fetch_add(1, std::memory_order_relaxed);
-        // CST816: keep the delivered state until enqueue succeeds, including a lift.
+        // CST816 and AXS5106: keep the delivered state until enqueue succeeds, including a lift.
         const bool raw = self->touch_.controller == TouchController::Cst816 ||
                          self->touch_.controller == TouchController::Axs5106;
         if (posted || !raw) was_touching = s.touching;
+        // The others would lose that lift (above); a raw controller reads the same finger again.
+        if (!posted && !s.touching && !raw) lift_tries = 1;
       }
       last = s;
     } else if ((self->touch_.controller == TouchController::Cst816 ||

@@ -645,6 +645,17 @@ class App {
   bool camera_frame_due_ = false;  // draw the next preview frame now, whatever camera_frame_at_ says
   HardwareCheck hardware_check_ = HardwareCheck::None;
   std::string check_result_;
+  // A microphone check smooths its meter: the peak jumps to a louder reading at once and lets
+  // go a few points at each screen update, and the screen takes a new value at most ten times a
+  // second, so the percentage is readable instead of flickering with every block of samples.
+  uint8_t check_level_ = 0;      // the peak held between screen updates
+  uint32_t check_level_at_ = 0;  // when the meter last reached the screen
+  // The last sign of life in a running check: a sample, or a button press in the input check.
+  // Thirty seconds without one stop the check itself, and a microphone that sends no samples
+  // for two seconds stops its check even sooner.
+  uint32_t check_progress_at_ = 0;
+  void start_hardware_check(HardwareCheck kind);
+  void mic_check_level(const int16_t* samples, size_t count);
   std::string wifi_setup_text_;
   // The setup network's scannable code, encoded once when the screen opens.
   qr::Code wifi_setup_qr_;

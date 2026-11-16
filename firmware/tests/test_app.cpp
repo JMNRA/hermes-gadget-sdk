@@ -2988,15 +2988,23 @@ TEST("power: an idle settings menu sleeps on every view; the wake input restores
   r.app.on_button(hg::Button::Talk, false);
   CHECK(r.fake.last("audio.start") == nullptr);
   // A running hardware check sleeps too: the meter pauses while dark and the
-  // wake input brings the same check back.
+  // wake input brings the same check back. The port keeps sending samples, as it
+  // would with a microphone that works: a check with no samples ends itself now.
   for (int i = 0; i < 3; ++i) r.app.console("cancel");
   CHECK_EQ(r.app.model().detail, std::string("Microphone check"));
   r.app.console("talk");
   r.app.console("release");
   CHECK(r.fake.mic_on);
-  r.advance(15000);
+  const int16_t samples[] = {4000, -4000, 4000, -4000};
+  auto live = [&](uint32_t ms) {
+    for (uint32_t t = 0; t < ms; t += 100) {
+      r.app.on_mic_samples(samples, 4);
+      r.advance(100);
+    }
+  };
+  live(15000);
   CHECK_EQ(r.fake.brightness, 10);
-  r.advance(15000);
+  live(15000);
   CHECK_EQ(r.fake.brightness, 0);   // sleeps even with the meter running
   CHECK(r.fake.mic_on);             // the check itself keeps running
   r.app.on_button(hg::Button::Talk, true);
@@ -8339,6 +8347,231 @@ TEST("settings list: a drag scrolls with the finger, stops at the ends, and chan
   r.app.on_button(hg::Button::Down, true);
   r.advance(500);
   CHECK(r.app.model().settings_scroll < last);
+}
+
+TEST("settings: a running check says how to stop it and how to leave") {
+  Rig r(Rig::touch_profile());
+  r.fake.backlight = true;
+  r.bring_online(true);
+  CHECK(r.app.open_settings());
+  CHECK_EQ(r.app.model().hint, std::string("Tap: change | Drag: scroll"));
+  for (int i = 0; i < 3; ++i) r.app.console("cancel");
+  CHECK_EQ(r.app.model().detail, std::string("Microphone check"));
+  r.app.console("talk");
+  r.app.console("release");
+  CHECK(r.fake.mic_on);
+  CHECK_EQ(r.app.model().hint, std::string("Tap: stop | Swipe down: leave"));
+  r.app.console("set language es");
+  CHECK_EQ(r.app.model().hint, std::string("Toca: parar | Desliza: salir"));
+  r.app.console("set language en");
+  r.app.console("talk");
+  r.app.console("release");
+  CHECK(!r.fake.mic_on);
+  CHECK_EQ(r.app.model().hint, std::string("Tap: change | Drag: scroll"));  // the check is over
+  r.app.close_settings();
+
+  // A board with buttons names them instead of the screen's gestures.
+  Rig b;
+  b.fake.backlight = true;
+  b.bring_online(true);
+  CHECK(b.app.open_settings());
+  for (int i = 0; i < 3; ++i) b.app.console("cancel");
+  b.app.console("talk");
+  b.app.console("release");
+  CHECK(b.fake.mic_on);
+  CHECK_EQ(b.app.model().hint, std::string("TALK: stop | CANCEL: leave"));
+}
+
+TEST("settings: the list scrolls while a check runs, so the way out stays reachable") {
+  Rig r(Rig::touch_profile());
+  r.fake.backlight = true;
+  r.bring_online(true);
+  CHECK(r.app.open_settings());
+  for (int i = 0; i < 3; ++i) r.app.console("cancel");
+  CHECK_EQ(r.app.model().detail, std::string("Microphone check"));
+  r.app.console("talk");
+  r.app.console("release");
+  CHECK(r.fake.mic_on);
+  CHECK(!r.app.settings_list_live());  // the rows are inert while it runs
+  hg::TouchGestures touch(r.app);
+  touch.update(true, 150, 200, r.fake.clock);
+  touch.update(true, 150, 170, r.fake.clock + 10);  // past the slop: a drag, not a tap
+  CHECK_EQ(r.app.model().settings_scroll, 30);
+  touch.update(true, 150, 120, r.fake.clock + 20);
+  CHECK_EQ(r.app.model().settings_scroll, 80);
+  touch.update(false, 0, 0, r.fake.clock + 30);
+  CHECK(r.fake.mic_on);                                              // scrolling activates nothing...
+  CHECK_EQ(r.app.model().detail, std::string("Microphone check"));   // ...and stops no check
+  CHECK_EQ(r.app.model().settings_scroll, 80);
+  // The rows stay inert: a tap stops the check, and changes no setting on the way.
+  const std::string volume = r.fake.kv["volume"];
+  tap_at(r, touch, 150, 150);
+  CHECK(!r.fake.mic_on);
+  CHECK_EQ(r.fake.kv["volume"], volume);
+  CHECK(r.app.model().body.find("Check stopped") != std::string::npos);
+}
+
+TEST("settings: the input check reports buttons on a board with them and leaves on a touch-only one") {
+  {
+    Rig r;
+    r.fake.backlight = true;
+    r.bring_online(true);
+    CHECK(r.app.open_settings());
+    for (int i = 0; i < 6; ++i) r.app.console("cancel");
+    CHECK_EQ(r.app.model().detail, std::string("Input check"));
+    CHECK(r.app.model().body.find("Cancel leaves this check") != std::string::npos);
+    r.app.console("talk");
+    r.app.console("release");
+    CHECK(r.app.model().body.find("Press a button") != std::string::npos);
+    CHECK_EQ(r.app.model().hint, std::string("TALK: stop | CANCEL: leave"));
+    r.app.on_button(hg::Button::Talk, true);
+    r.app.on_button(hg::Button::Talk, false);
+    CHECK(r.app.model().body.find("TALK pressed") != std::string::npos);  // the check goes on
+    CHECK_EQ(r.app.model().hint, std::string("TALK: stop | CANCEL: leave"));
+    r.app.on_button(hg::Button::Cancel, true);
+    r.app.on_button(hg::Button::Cancel, false);
+    CHECK(r.app.model().body.find("TALK pressed") == std::string::npos);  // Cancel left the check
+  }
+  // A board whose screen is its only control has no button to report: a tap leaves the check.
+  Rig r(Rig::touch_profile());
+  r.fake.backlight = true;
+  r.bring_online(true);
+  CHECK(r.app.open_settings());
+  for (int i = 0; i < 6; ++i) r.app.console("cancel");
+  CHECK_EQ(r.app.model().detail, std::string("Input check"));
+  CHECK(r.app.model().body.find("Tap to stop, swipe down to leave") != std::string::npos);
+  r.app.console("talk");
+  r.app.console("release");
+  CHECK(r.app.model().body.find("The first touch ends the check") != std::string::npos);
+  CHECK_EQ(r.app.model().hint, std::string("Tap: stop | Swipe down: leave"));
+  hg::TouchGestures touch(r.app);
+  tap_at(r, touch, 150, 150);
+  CHECK(r.app.model().body.find("Check stopped") != std::string::npos);
+  CHECK_EQ(r.app.model().hint, std::string("Tap: change | Drag: scroll"));  // gone, not re-armed
+}
+
+TEST("settings: the microphone check smooths its meter and repaints at most ten times a second") {
+  Rig r;
+  r.fake.backlight = true;
+  r.bring_online(true);
+  CHECK(r.app.open_settings());
+  for (int i = 0; i < 3; ++i) r.app.console("cancel");
+  CHECK_EQ(r.app.model().detail, std::string("Microphone check"));
+  r.app.console("talk");
+  r.app.console("release");
+  CHECK(r.fake.mic_on);
+  const int16_t loud[] = {32767, -32767, 32767, -32767};
+  const int16_t quiet[] = {0, 0, 0, 0};
+  // The first block reaches the screen at once, so the level is never a stale one.
+  r.app.on_mic_samples(loud, 4);
+  CHECK_EQ(r.app.model().level, uint8_t(99));
+  CHECK(r.app.model().body.find("Level: 99%") != std::string::npos);
+  // The rest of that tenth of a second leaves it alone: one reading, not ten.
+  for (int i = 0; i < 9; ++i) r.app.on_mic_samples(quiet, 4);
+  CHECK_EQ(r.app.model().level, uint8_t(99));
+  // Silence: the peak lets go four points at a time, never all at once, and reaches zero.
+  uint8_t last = r.app.model().level;
+  int drops = 0;
+  for (int step = 0; step < 30; ++step) {  // three seconds, a block every 10 ms
+    for (int i = 0; i < 10; ++i) {
+      r.app.on_mic_samples(quiet, 4);
+      r.advance(10);
+    }
+    const uint8_t level = r.app.model().level;
+    CHECK(level <= last);
+    CHECK(int(last) - int(level) <= 4);  // four points each tenth of a second
+    if (level != last) ++drops;
+    last = level;
+  }
+  CHECK(drops > 1);              // it does let go, a step at a time
+  CHECK_EQ(last, uint8_t(0));    // and reaches nothing within three seconds
+  // A hundred blocks a second of speech-like level: at most ten new readings a second.
+  r.app.on_mic_samples(loud, 4);
+  CHECK_EQ(r.app.model().level, uint8_t(99));  // the attack is immediate
+  int changes = 0;
+  uint8_t shown = r.app.model().level;
+  for (int i = 0; i < 100; ++i) {
+    r.app.on_mic_samples(i % 2 ? quiet : loud, 4);
+    r.advance(10);
+    if (r.app.model().level != shown) {
+      shown = r.app.model().level;
+      ++changes;
+    }
+  }
+  CHECK(changes <= 11);
+}
+
+TEST("settings: a check stops itself without progress, and a silent microphone sooner") {
+  // The display check has nothing to press: it ends after thirty seconds, saying what a
+  // check stopped by hand says.
+  {
+    Rig r;
+    r.fake.backlight = true;
+    r.bring_online(true);
+    CHECK(r.app.open_settings());
+    for (int i = 0; i < 5; ++i) r.app.console("cancel");
+    CHECK_EQ(r.app.model().detail, std::string("Display check"));
+    r.app.console("talk");
+    r.app.console("release");
+    CHECK(r.app.model().color_test);
+    r.advance(29000);
+    CHECK(r.app.model().color_test);  // still running a second before the bound
+    r.advance(2000);
+    CHECK(!r.app.model().color_test);
+    CHECK(r.app.model().body.find("Check stopped") != std::string::npos);
+    CHECK_EQ(r.app.model().hint, std::string("TALK: change | CANCEL: next"));  // the check is over
+    CHECK(r.app.settings_list_live());
+  }
+  // A button pressed in the input check is progress: the thirty seconds count from it.
+  {
+    Rig r;
+    r.fake.backlight = true;
+    r.bring_online(true);
+    CHECK(r.app.open_settings());
+    for (int i = 0; i < 6; ++i) r.app.console("cancel");
+    CHECK_EQ(r.app.model().detail, std::string("Input check"));
+    r.app.console("talk");
+    r.app.console("release");
+    CHECK(r.app.model().body.find("Press a button") != std::string::npos);
+    r.advance(25000);
+    r.app.on_button(hg::Button::Talk, true);
+    r.app.on_button(hg::Button::Talk, false);
+    CHECK(r.app.model().body.find("TALK pressed") != std::string::npos);
+    r.advance(10000);  // 35 s after the start, 10 s after the press
+    CHECK_EQ(r.app.model().body.find("Check stopped"), std::string::npos);  // still running
+    r.advance(21000);  // now 31 s without progress
+    CHECK(r.app.model().body.find("Check stopped") != std::string::npos);
+    CHECK(r.app.settings_list_live());
+  }
+  // A microphone that sends no samples for two seconds stops its check; samples are progress,
+  // so a live one is never stopped by the thirty-second bound.
+  {
+    Rig r;
+    r.fake.backlight = true;
+    r.bring_online(true);
+    CHECK(r.app.open_settings());
+    for (int i = 0; i < 3; ++i) r.app.console("cancel");
+    r.app.console("talk");
+    r.app.console("release");
+    CHECK(r.fake.mic_on);
+    r.advance(1900);
+    CHECK(r.fake.mic_on);  // under two seconds: still waiting for the first samples
+    r.advance(200);
+    CHECK(!r.fake.mic_on);
+    CHECK(r.app.model().body.find("Check stopped") != std::string::npos);
+    CHECK(r.app.settings_list_live());
+    r.app.console("talk");
+    r.app.console("release");
+    CHECK(r.fake.mic_on);
+    const int16_t samples[] = {8000, -8000, 8000, -8000};
+    for (int i = 0; i < 31; ++i) {  // past thirty seconds, with a sample every second
+      r.app.on_mic_samples(samples, 4);
+      r.advance(1000);
+    }
+    CHECK(r.fake.mic_on);
+    CHECK(r.app.model().body.find("Check stopped") == std::string::npos);
+    r.app.close_settings();
+  }
 }
 
 TEST("settings list: a tap selects a row and changes it; toggles flip on the first tap") {

@@ -26,6 +26,8 @@ namespace hg::i18n {
   X(Settings,               "Settings") \
   X(SettingsHintTouch,      "Tap: change | Drag: scroll") \
   X(SettingsHintButtons,    "{0}: change | {1}: next") \
+  X(CheckHintTouch,         "Tap: stop | Swipe down: leave") \
+  X(CheckHintButtons,       "{0}: stop | {1}: leave") \
   X(SpeakerVolume,          "Speaker volume") \
   X(ChangesSaved,           "Changes are saved.") \
   X(NoSpeakerDriver,        "No speaker driver is active.") \
@@ -49,6 +51,7 @@ namespace hg::i18n {
   X(DisplayCheckIntro,      "Start to show red, green, blue, white and black bands.") \
   X(InputCheck,             "Input check") \
   X(InputCheckIntro,        "Start to check the controls. Cancel leaves this check.") \
+  X(InputCheckIntroTouch,   "Start to check the screen. Tap to stop, swipe down to leave.") \
   X(Camera,                 "Camera") \
   X(CameraIntro,            "Open the camera. Tap for a photo after a three-second countdown; tap again to retake. Swipe down to leave.") \
   X(CameraTake,             "Tap to take a photo") \
@@ -146,6 +149,7 @@ namespace hg::i18n {
   X(SpeakerUnavailable,     "Speaker unavailable") \
   X(DisplayUnavailable,     "Display unavailable") \
   X(InputCheckRunning,      "Press a button. Release Cancel to leave.") \
+  X(InputCheckRunningTouch, "Touch the screen. The first touch ends the check.") \
   X(ButtonPressed,          "{0} pressed") \
   X(PowerOffConfirm,        "Select again to power off. Cancel goes back.") \
   X(PowerOffRequested,      "Power-off requested") \

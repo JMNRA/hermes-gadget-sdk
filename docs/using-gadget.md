@@ -125,7 +125,9 @@ Settings is one list. Each row shows a small icon, the item's name, and its stat
 
 Tap CANCEL to move to the next item, then tap TALK to change it. Boards with Up and Down buttons, or a knob, can move in either direction. The list scrolls smoothly to keep the selected row in view.
 
-On a touchscreen, drag the list up or down to scroll it, and tap a row to change it. The first tap on an on/off item flips it. The first tap on volume or brightness opens its slider; tap or drag along the bar to set the level, in steps of 5 percent. A drag only scrolls; it changes nothing. While a hardware check runs, a tap stops it and a swipe down moves to the next item, as before.
+On a touchscreen, drag the list up or down to scroll it, and tap a row to change it. The first tap on an on/off item flips it. The first tap on volume or brightness opens its slider; tap or drag along the bar to set the level, in steps of 5 percent. A drag only scrolls; it changes nothing.
+
+While a hardware check runs, the rows are inert and the bottom bar says how the check ends: **Tap: stop | Swipe down: leave** on a touchscreen, or **TALK: stop | CANCEL: leave** on a board with buttons. A tap (or TALK) stops the check where it is and the row says **Check stopped**; the list itself still scrolls under a drag, so the way out stays reachable. A swipe down (or CANCEL) leaves the row and moves to the next item. A check that waits on you also stops itself: the microphone, display and input checks end after 30 seconds without progress, and the microphone check ends after 2 seconds without samples from the microphone, both showing **Check stopped**. A button pressed in the input check counts as progress, and so does every block of samples the microphone sends.
 
 Select **Back to Hermes** to leave.
 
@@ -137,10 +139,10 @@ Select **Back to Hermes** to leave.
 | Touch to talk | Touchscreens with a TALK button (BOOT on most): choose whether holding or tapping the screen talks; on by default |
 | Hermes profile | Choose the Hermes profile (touchscreens), or switch to the next one; shown only when Hermes offers more than one |
 | Profiles per page | Touchscreens: choose how many profiles a page of the profile grid holds (2 x 2, 2 x 3, 3 x 3 or 4 x 4); shown only when Hermes offers more than one |
-| Microphone check | Show the live input level; nothing is saved or sent to Hermes |
+| Microphone check | Show the live input level as a readable percentage: the peak rises to a louder sound at once and settles slowly, about ten readings a second; nothing is saved or sent to Hermes |
 | Speaker check | Play a short, quiet tone at the current volume |
 | Display check | Show red, green, blue, white, and black bands |
-| Input check | Show the last button pressed; release CANCEL to leave the check |
+| Input check | Show the last button pressed; release CANCEL to leave the check. On a board whose screen is its only control, show the touch feedback and let the first touch end the check |
 | Device information | Show the board, firmware, device ID, and available audio drivers |
 | Battery and power | Show available power readings on boards with a power driver; select to choose what the top of the screen shows: icon, percentage, both, or off |
 | Low battery alert | Boards with a power driver and a display: choose Off (the default), 10%, 10% and 5%, 15%, 10% and 5%, or 20% and 10% for the screen to light with a low battery reminder |
