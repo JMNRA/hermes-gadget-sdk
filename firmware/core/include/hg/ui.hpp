@@ -36,6 +36,7 @@ enum class Screen : uint8_t {
   Prompt,  // a yes/no question from Hermes, answered with the buttons
   Updating,  // installing a firmware update
   Settings,
+  Camera,     // the device's own camera: a live view, a countdown, and the photo (App::open_camera)
   Setup,
   Dashboard,  // Hermes's sessions and the user's status tiles (docs/protocol.md#dashboard)
   Profiles,   // the Hermes profiles to choose from: a grid of `dash` (name, id), the page from item `scroll`
@@ -44,6 +45,7 @@ enum class Screen : uint8_t {
   LowBattery, // the low battery alert: a red battery icon, `headline` (the percentage) large, `detail` below
   Charging,   // plugged in: the same face in green with a bolt; no bar and no headline without a level
   Charged,    // a full battery: the same face in green, full
+  Choice,     // a question with a list of answers (`items`), one picked by touch or the keys
 };
 
 enum class Link : uint8_t { Offline, Network, Connecting, Online };
@@ -64,7 +66,7 @@ struct DashRow {
 struct SettingRow {
   enum class Kind : uint8_t { Value, Toggle, Slider, Action };
   enum class Icon : uint8_t { Volume, Sun, Talk, Person, Mic, Note, Screen, Keys, Info, Battery, Timer, Touch,
-                              FaceDown, Clock, Power, Wifi, Phone, Globe, Back, Bell, Bolt, Check, Grid };
+                              FaceDown, Clock, Power, Wifi, Phone, Globe, Back, Bell, Bolt, Check, Grid, Camera };
   std::string label, value;  // Value: the text at the right; Slider: its percentage
   Icon icon = Icon::Info;
   Kind kind = Kind::Value;
@@ -106,6 +108,9 @@ struct UiModel {
   uint8_t caption_lines = 1;  // hero: lines the detail may wrap to (then "..")
   bool name_target = false;   // hero: the caption sits in a panel that a tap opens the profile list from
   const mascot::Face* face = nullptr;  // drawn instead of the mascot; borrowed like `qr`
+  // hero, on Ready, Thinking and Responding: the face's expression (face.set). Other screens ignore it.
+  mascot::Expression expression = mascot::Expression::Neutral;
+  bool expression_still = false;  // its mark has stopped moving (App::expression_still)
   // Profiles screen: profiles per page asked for (4, 6, 9 or 16; the panel may fit fewer), and the
   // items whose icon is `face` and the mascot (-1: none). The others show their initial.
   uint8_t grid = 4;
@@ -127,12 +132,22 @@ struct UiModel {
   int settings_scroll = 0;
   // Dashboard screen: its rows, drawn from `scroll` (0 = the top).
   std::vector<DashRow> dash;
+  // Card screen, a structured card (docs/protocol.md#display): `items` are list rows after the body's
+  // lines, `card_progress` a bar above them (0..100; -1: none) and `card_qr` a code that takes the
+  // content band (borrowed like `qr`). Choice screen: `items` are the answers, `item_sel` the
+  // highlighted one (-1: none), and `detail` a question too long for the header, wrapped above
+  // them. Both draw from line or row `scroll`.
+  std::vector<std::string> items;
+  int8_t card_progress = -1;
+  const qr::Code* card_qr = nullptr;
+  int16_t item_sel = -1;
   // A running timer: thousandths of its length still to go, or -1 for none. The round
   // panel's edge ring and the rectangular top bar's line show it.
   int16_t timer_permille = -1;
   // The round panel's edge ring: while recording, thousandths of the recording limit used
   // so far; while updating, of the firmware image received (1000 while restarting). -1: none.
   int16_t progress_permille = -1;
+  bool animate = true;     // the `animation` setting: the ring's comet and the Updating screen move
   bool flash = false;  // Screen::Alarm: the green half of a beep cycle
   // Screen::Clock: the time and the date as the app formats them, and the minute
   // that picks the burn-in shift. The face's text changes once a minute; on a round
@@ -206,6 +221,22 @@ class Ui {
   int body_rows(const UiModel& m) const;
   // Dashboard rows that fit the content band.
   int dash_rows() const;
+  // A structured card: whether the model is one, the lines it has (the body's, then its items) and
+  // how many fit under its progress bar; the pixels a module of a code gets in the content band
+  // (0: the code does not fit), and the largest code version that fits there (0: none).
+  static bool card_rich(const UiModel& m) { return !m.items.empty() || m.card_progress >= 0 || m.card_qr; }
+  int card_lines(const UiModel& m) const;
+  int card_rows(const UiModel& m) const;
+  int card_qr_scale(int modules) const;
+  int card_qr_version() const;
+  // Characters the header's headline holds.
+  int header_cols() const;
+  // The Choice list: the lines a question in `detail` may take above it (at least two answers
+  // stay on screen under them), the rows that fit under this model's question, and the answer
+  // under a panel point (-1: none).
+  int choice_question_lines() const;
+  int choice_rows(const UiModel& m) const;
+  int choice_row_hit(const UiModel& m, int x, int y) const;
   // The largest size the Ready screen draws the face at (one caption line, no name panel): a colour face
   // is sent at this size and scaled down where there is less room.
   int face_px() const { return hero_geom(UiModel{}).size; }
@@ -265,6 +296,11 @@ class Ui {
   void draw_content(Canvas& c, const UiModel& m);
   bool draw_qr(Canvas& c, const UiModel& m, int y0, int y1);
   void draw_dashboard(Canvas& c, const UiModel& m, int y0, int y1);
+  void draw_card(Canvas& c, const UiModel& m, int y0, int y1);
+  void draw_choice(Canvas& c, const UiModel& m, int y0, int y1);
+  int choice_row_h() const;
+  std::vector<std::string> choice_question(const UiModel& m) const;  // wrapped, cut to what fits
+  int choice_list_top(const UiModel& m) const;  // area row of the first answer
   void draw_profiles(Canvas& c, const UiModel& m);
   void draw_settings(Canvas& c, const UiModel& m, int y0, int y1);
   std::vector<std::string> settings_desc(const UiModel& m) const;  // the selected row's description lines
@@ -300,8 +336,13 @@ class Ui {
   };
   HeroGeom hero_geom(const UiModel& m) const;
   void draw_hero(Canvas& c, const UiModel& m);
-  // Rows [y0, y1) that hero animations may touch for this screen.
-  void hero_anim_rows(const UiModel& m, int& y0, int& y1) const;
+  // Rows [y0, y1) that hero animations may touch for this screen, given the expression and the
+  // frame drawn last: a changed expression takes its mark and mouth with it, and a step of the
+  // mark alone leaves the eyes out.
+  void hero_anim_rows(const UiModel& m, mascot::Expression was, mascot::Frame was_frame, int& y0, int& y1) const;
+  // Area coordinates: where an expression's mark is drawn, beside the head at the thinking dots' anchor.
+  Rect mark_rect(const HeroGeom& g, const mascot::Anchors& a) const;
+  void draw_mark(Canvas& c, const UiModel& m, const Rect& r);
   // Round panels: the edge ring (set_ring derives what its pixels need once per frame;
   // paint_ring paints it over rows; update_ring writes and sends only what changed in a
   // rectangle, which comet_box narrows to what a comet's step can change), and the
@@ -331,6 +372,9 @@ class Ui {
   uint32_t hero_static_ = 0, hero_anim_ = 0;
   uint32_t battery_hash_ = 0;
   bool hero_valid_ = false;
+  // The expression and the frame the hero band shows.
+  mascot::Expression hero_expression_ = mascot::Expression::Neutral;
+  mascot::Frame hero_frame_ = mascot::Frame::Idle;
   bool valid_ = false;
   // frame timing (measure)
   FrameStats* stats_ = nullptr;

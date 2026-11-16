@@ -31,10 +31,11 @@
 |---|---|
 | `hal.hpp` | `Display`, `AudioIn`, `AudioOut`, `Transport`, `Storage`, `System`, and the optional `Updater` (the firmware update slot): implemented per port |
 | `app.hpp/.cpp` | `hg::App`, the single-threaded application. Connection phases (boot → network → connecting → handshake → online) × interaction modes (idle, listening, thinking, responding) × overlays (card, image, question). It also authorizes and checks firmware updates and confirms a new firmware once it reaches Hermes |
+| `app_face.cpp` | The face's expression: the `face.set` device action, the console's `face` command, and when an expression ends (its seconds, or the user's next turn: `App::end_expression()`, called where a recording starts, a typed message is sent and a new session is asked for). Registered from `App::begin()` on boards with a display |
 | `app_timer.cpp` | The timer: the three device actions (`timer.start`, `timer.status`, `timer.cancel`), the countdown and the alarm with its beeps. Registered from `App::begin()` on boards with a display or a speaker. The alarm is not an overlay: it has its own screen, survives a dropped connection, and stops on a press, a tap or swipe, `timer.cancel`, `timer.start`, a recording, or a new card or image |
 | `protocol.*`, `json.*`, `crypto.*` | Message helpers, a small JSON parser/serializer, SHA-256/HMAC/Base64 for authentication and update checks |
 | `ui.*`, `canvas.*`, `font5x7.cpp` | Deterministic renderer: a `UiModel` is drawn in four horizontal bands (top bar, header, content, hint bar). Only bands whose inputs changed are redrawn and flushed |
-| `vad.*` | Energy VAD that ends hands-free (tap) utterances on silence |
+| `vad.*` | Energy VAD that ends hands-free (tap) utterances on silence; levels are measured below 3.4 kHz |
 
 On a round panel, the edge ring lies in the band just inside the glass edge, around the UI square, which no band owns. `Ui` derives one ring per frame from the model, the first match winning: none on the alarm or a battery face, the resting clock's marks and seconds dot, the recording limit used, update progress, the timer's countdown, or a thinking, speaking or connecting comet. So a recording or an update takes the ring from a running timer, which comes back after it. Every flush repaints the ring's pixels for the rows it sends, so no band, face or battery strip can erase it. A ring that appears or goes away repaints the panel once; without a ring, the bands own the band's pixels in the UI square's corners. Any other ring change writes only the ring's pixels that differ and sends their rows, with changed rows at most 8 apart sent as one run. A comet's step computes only the rectangle that holds what the comet lights where it was and where it is, about a quarter of the band (`Ui::comet_box`, from each degree's rectangle of band pixels, found once with the layout). On a framebuffer that holds only a band of rows (no PSRAM), any ring change repaints the panel; no round board is banded today. The alarm, the battery faces and the resting clock (`Screen::Clock`, on an online, paired Ready screen after the `clock` setting's rest) each take the whole panel instead of the bands; the clock keeps the ring, whose seconds dot is about twice as wide as the band, so on the clock the ring also owns the dot's reach on both sides of it, and each second the dot moves without redrawing the face, checking only the rows of its old and new places. The clock's marks and dot turn half a degree per pixel of the face's sideways burn-in shift, so by up to 2 degrees; the turn changes only with the minute, whose repaint of the face carries it. One full-panel face flag records which face owns the panel, and leaving it repaints everything. The clock keeps its own rest stamp, so its rest counts from the end of the last speech, reply or overlay rather than the last input.
 
@@ -68,7 +69,17 @@ Every screen that isn't showing reply text uses a **hero layout**: the Hermes Ag
   - green sound waves from her headphone cup while listening, scaled by the microphone level;
   - blue thought dots while thinking;
   - a moving mouth and amber waves while speaking.
-- **Partial redraws:** the hero band tracks static content (screen, caption) separately from animation state. When only the animation changes, it redraws and flushes just the rows that animation can touch: the eye rows for a blink, the wave rows while listening. A blink therefore costs about 25 rows of SPI traffic, not a full screen.
+- **Expressions:** Hermes gives the face an expression with the [`face.set` action](protocol.md#the-faceset-action), and the console does with `face <expression> [seconds]`. `app_face.cpp` holds it; `ui.cpp` draws it on the idle, thinking and speaking screens from the three frames and a small mark at the thinking dots' anchor, so it adds no bitmaps:
+
+  | Expression | Frames | Mark |
+  |---|---|---|
+  | `happy` | as neutral | two amber sparkles that swap sizes |
+  | `confused` | as neutral | a blue `?` that tilts from side to side |
+  | `alert` | eyes stay open, mouth open (the talk frame) | a red `!` that pulses |
+  | `sleepy` | eyes shut (the blink frame) | grey `zZ` |
+
+  While thinking, the mark takes the dots' place. While a reply is spoken, the mouth keeps moving and only the mark shows. The mark changes twice a second for 60 s after `face.set`, then stands still, so an expression that lasts for hours stops costing redraws; it also stands still with the `animation` setting off. A custom face and a profile's face show an expression the same way, with their own frames and their own thinking-dots anchor ([faces.md](faces.md#expressions)).
+- **Partial redraws:** the hero band tracks static content (screen, caption) separately from animation state. When only the animation changes, it redraws and flushes just the rows that animation can touch: the eye rows for a blink, the wave rows while listening. A blink therefore costs about 25 rows of SPI traffic, not a full screen. An expression is animation state too: setting, changing or clearing one redraws the mark's rows, the eye rows and, to or from `alert`, the mouth rows. A step of the mark redraws the mark's rows alone, 35 on a 320x240 screen, for every expression; a blink under an expression redraws from the mark down to the eyes.
 - **Speaking:** while a reply is spoken, the face talks over the reply's latest two lines, then the text layout shows the whole reply when the speech ends. A tap, UP or DOWN shows the whole text at once. On panels where two caption lines would push the face down to its smallest bitmap (240x135, 128x128 and the 240x240 round), the reply's text takes the screen as soon as it arrives, and the face talks only while no text has arrived yet.
 - **Reply text:** a finished reply stays on screen for 20 s before the mascot returns. On boards with scroll buttons, UP brings it back. Until a button press or touch lands on the reply's text, it counts as unread: when the screen goes dark first, the input that wakes it shows the reply again, from the top, for another 20 s. A press or touch over the mascot does not count as reading it.
 - **Waiting for Hermes:** the Thinking screen keeps the display lit. A request that Hermes hasn't started a turn for gives up after 3 minutes without a message and shows "No reply from Hermes". Once Hermes sends `turn.start`, the device waits for its `turn.end` (or a lost connection) for up to 30 minutes without a message, so a long task doesn't send the screen back to Ready and then dark.
@@ -76,7 +87,7 @@ Every screen that isn't showing reply text uses a **hero layout**: the Hermes Ag
 
 ### Interaction
 
-- **Push-to-talk (default):** hold to speak, release to send. A press under 350 ms is discarded as a tap, and recording stops at 30 s.
+- **Push-to-talk (default):** hold to speak, release to send. A press under 350 ms is discarded as a tap, and recording stops at 60 s, the server's default `max_utterance_s`. A board profile that sets `codec.drop_silent_recordings` drops a held recording with less than 200 ms of speech over its `codec.vad_min_rms` and shows "Didn't hear anything".
 - **Tap mode** (`set talk_mode tap`): tap to start; the VAD (or a second tap) ends the utterance.
 - **Barge-in:** pressing talk while a reply plays stops playback immediately. The new message reaches Hermes, whose default "interrupt" busy mode stops the old turn.
 - **Cancel** acts on release: it discards a recording, dismisses an overlay, or stops a turn (Hermes `/stop`).
@@ -85,10 +96,10 @@ Every screen that isn't showing reply text uses a **hero layout**: the Hermes Ag
 
 ### The recording buffer
 
-On boards with PSRAM to spare (`DeviceProfile::recording_alloc`), a recording is kept whole on the device while it uploads (`hg::RecordingBuffer`, 1 MB for the 30 s limit at 16 kHz, 1.5 MB at 24 kHz, set aside at start-up, and only when about 1 MB of PSRAM stays free after it; start-up logs `recording buffer on` or why not). The microphone writes to the buffer, and the app sends from it in 40 ms frames as the link takes them:
+On boards with PSRAM to spare (`DeviceProfile::recording_alloc`), a recording is kept whole on the device while it uploads (`hg::RecordingBuffer`, 2 MB for the 60 s limit at 16 kHz, 3 MB at 24 kHz, set aside at start-up, and only when about 1 MB of PSRAM stays free after it; start-up logs `recording buffer on` or why not). The microphone writes to the buffer, and the app sends from it in 40 ms frames as the link takes them:
 
 - **A slow link** delays frames instead of dropping them. `audio.end` waits until the link has taken all of the recording.
-- **A lost connection mid-recording** doesn't end it. The screen stays on Listening with "Offline, still recording", and the recording ends as usual: release, a tap, the VAD, or the 30 s limit. The app reconnects in the background, starting at the shortest backoff.
+- **A lost connection mid-recording** doesn't end it. The screen stays on Listening with "Offline, still recording", and the recording ends as usual: release, a tap, the VAD, or the 60 s limit. The app reconnects in the background, starting at the shortest backoff.
 - **Back online** (welcome, paired), the whole recording goes again on a new stream: `audio.start` with the same `id` plus `resent` and `age_ms`, every frame as fast as the link takes them, then `audio.end`. A connection back before the recording ends sends what was held and streams on.
 - **Ended while offline,** the device shows Thinking with "Reconnecting to send..." and waits up to 45 s (`App::kRecordingWaitMs`, about three connection attempts). Failed attempts don't extend the wait. After that it drops the recording and says "Couldn't send the recording".
 - **CANCEL** discards a held recording, while recording or while waiting. A device that comes back unpaired drops it. The buffer is RAM only, so a restart loses it.
@@ -106,6 +117,7 @@ A board without PSRAM, or whose PSRAM fails the headroom check or the allocation
 | `tools.py` | Agent tools, run on agent worker threads and bridged to the hub loop with `run_coroutine_threadsafe` |
 | `textfmt.py` | Markdown → plain text, typography → ASCII |
 | `audio.py` | WAV packing, streaming resampler, file decoding (WAV natively, the rest through ffmpeg) |
+| `playback.py` | `gadget_play`: which files and URLs may be opened, decoding a chunk at a time (WAV natively, the rest through ffmpeg), and the task that feeds `AudioOut` no faster than it sends |
 | `imaging.py` | Any image → RGB565 that fits the device's image box (Pillow) |
 | `store.py` | Device keys and pending pairing codes in the plugin's data directory |
 
@@ -121,6 +133,7 @@ A board without PSRAM, or whose PSRAM fails the headroom check or the allocation
   - The key is sent once, at enrollment. After that the device proves possession with an HMAC over a fresh server nonce, so recorded traffic cannot be replayed.
   - Another device cannot take over an enrolled id.
 - **Authorization:** Hermes's own allowlists and DM pairing. Every message from a device is authorized by the gateway runner exactly like a message from a Telegram user, and pairing approval happens on the Hermes host. A device that switches profiles is approved once, in the default profile: the plugin approves it in each profile when it first switches there, and a revocation in the default profile sends it back.
+- **Audio the agent plays:** only a `gadget_play` tool call makes the gateway open a file or fetch a URL, never a device message. Files come from Hermes's audio cache and the folders in `play_dirs`; URLs are `http(s)` only and pass Hermes's URL policy (no private or internal addresses by default) at every connection and redirect, except that behind an HTTP(S) proxy Hermes leaves name resolution, and so the connection-time check, to the proxy; `ffmpeg` decodes what it is handed, as an audio container only, and may open nothing else. Opening a source, a stalled stream and the whole playback are each bounded by the clock. See [Playing audio](hermes-integration.md#playing-audio).
 - **Transport:** use `wss://` (`tls_cert`/`tls_key`) on any network you don't trust. On a home LAN, plain `ws://` exposes conversation content to anyone on the network, though not the device key after enrollment.
 
 ## Why not use an existing Hermes API instead of a plugin?

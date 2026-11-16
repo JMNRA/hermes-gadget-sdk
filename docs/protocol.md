@@ -70,6 +70,8 @@ Because the id is derived from the key, nobody can claim another device's id wit
 - `caps.speaker.formats` (`["pcm16", "opus"]`) lists the speaker audio formats the device decodes. `format` stays `"pcm16"` for servers that predate the list, and PCM16 is always accepted. See [Audio to the device](#audio-to-the-device).
 - `caps.speaker.buffer_ms` (`4096`) is how much reply audio, in milliseconds, the device can hold before it plays it. The server then sends audio further ahead of real time, which keeps playback smooth on a link whose delay varies, such as a phone hotspot. It is optional: without it the server keeps its default lead. See [Audio to the device](#audio-to-the-device).
 - `caps.ota` (`{"max_size": 2031616}`) means the device installs firmware updates over this connection, up to `max_size` bytes.
+- `caps.card` (`{"v": 1, "items": 12, "qr": 287}`) means the device draws [structured cards](#structured-cards): lists, a progress bar and QR codes. `items` is how many list rows it keeps from one card. `qr` is the longest text, in bytes, that it draws as a code; a device that draws no codes leaves it out.
+- `caps.choice` (`{"v": 1, "options": 6, "title_cols": 25, "title_lines": 4}`) means the device takes a [choice](#choices): a question with up to `options` answers, one of which the user picks. `title_cols` and `title_lines` are the room the question has: that many lines of that many characters. A device may leave them out.
 - `caps.dashboard` (`{"v": 1, "rows": 6}`) means the device draws the [dashboard](#dashboard). `v` is the newest layout it draws, and `rows` is how many lines fit on its screen at once.
 - `actions` is the device's tool manifest. Each action has a JSON-Schema `params` object and a `description` written for the model.
 - `caps.profiles: true` means the device can switch Hermes profiles (see [Profiles](#profiles)). `profile` is the profile it used last; it is omitted for `default`.
@@ -132,6 +134,9 @@ A Hermes gateway can serve several profiles (each with its own memory, personali
 | `{"type": "profile.select", "profile": "ops"}` | device → server | Ask to talk to another profile |
 | `{"type": "profile", "profile": "ops"}` | server → device | The profile now answering this device; the device stores it and sends it as `hello.profile` next time |
 | `{"type": "profile", "profile": "default", "error": "busy"}` | server → device | The request was refused; `profile` is unchanged. `error` is `unknown`, `busy` (a turn or question is pending), `unpaired` or `routed` |
+| `{"type": "profiles", "profiles": [{"id": "default", "name": "Hermes"}, {"id": "ops", "name": "Ops"}]}` | server → device | The profiles the device may use changed since `welcome` (one created, deleted, parked or taken off the offer); the list replaces `welcome.profiles` |
+
+The server sends `profiles` only to a device that sent `caps.profiles: true`, and only when that device's list changes; its entries are those of `welcome.profiles`. It doesn't change the profile answering the device: when that profile leaves the list, the server sends `profile` with `default` as well. A device that doesn't know `profiles` ignores it, as it ignores any unknown message type, and gets the new list at its next welcome. The reference firmware replaces its list and, if the profile grid is open, redraws it on the same page, or on the last page when the list got shorter; with no other profile left, the grid closes. The Hermes plugin compares each device's list with Hermes's profiles at every pairing check, every 2 seconds, so a profile made with `hermes profile create` or in Hermes Desktop shows on the device within a few seconds, without a reconnect or a gateway restart.
 
 A refusal changes nothing on the device. `error` is `routed` when the server's configuration routes this device to a profile; such a device gets no `profiles` in `welcome`. The server may also send `profile` on its own, for example `default` after the device's approval is revoked. A device that does not send `caps.profiles` keeps the gateway's existing routing (normally the default profile).
 
@@ -207,6 +212,7 @@ The Hermes plugin makes a profile's thumbnail from its `gadget-face.bin` (the id
 | `{"type": "cancel"}` | Stop the current turn (Hermes `/stop`). With no turn running it only stops the reply audio the server is still sending, and no `/stop` is sent |
 | `{"type": "session.new"}` | Start a fresh conversation (Hermes `/new`). The reference firmware sends it when CANCEL is held for 2 s |
 | `{"type": "prompt.reply", "id": "q1", "answer": "yes"}` | The answer (`yes` or `no`) to a `prompt` |
+| `{"type": "choice.reply", "id": "c1", "index": 1}` | The answer to a `choice`: the picked option, counted from 0. `{"type": "choice.reply", "id": "c1", "cancelled": true}` when the user cancelled; see [Choices](#choices) |
 
 - Utterances shorter than 0.25 s are dropped with a `notice`, and the server then sends a `turn.end` with an empty `turn` and outcome `cancelled`, so the device stops waiting.
 - A device may send a recording again after a lost connection, on the new connection and on a new `stream`, with the same `id`. Its `audio.start` then carries `"resent": 1` (how many times it was sent again) and `"age_ms"` (how long ago the recording began). Its frames arrive faster than real time. A server assembles an utterance by stream whatever the pace, so these fields are informational: the reference hub logs them, and older hubs ignore them.
@@ -225,6 +231,8 @@ The Hermes plugin makes a profile's thumbnail from its `gadget-face.bin` (the id
 | `{"type": "notice", "text": "...", "ttl_s": 8}` | Transient one-line message |
 | `{"type": "prompt", "id": "q1", "title": "Confirm /new", "text": "...", "ttl_s": 300}` | A yes/no question; see [Questions](#questions) |
 | `{"type": "prompt.close", "id": "q1"}` | The question was withdrawn (timed out or answered elsewhere) |
+| `{"type": "choice", "id": "c1", "title": "Which list?", "options": ["Groceries", "Hardware"], "ttl_s": 60}` | A question with a few answers to pick from; see [Choices](#choices) |
+| `{"type": "choice.close", "id": "c1"}` | The choice was withdrawn |
 | `{"type": "error", "code": "...", "message": "..."}` | Protocol or auth error; the server usually closes the connection next |
 
 Reply text is already shaped for the device: Markdown is stripped and the text is folded to what its `charset` draws. `"ascii"` gets printable ASCII only. `"latin1"` gets ASCII and Latin-1 (U+00A1 to U+00FF, so accented letters, ¿ ¡ and the like), with no-break spaces as plain spaces; anything else is folded to the nearest letter or dropped. Text is UTF-8 either way, and devices render it as-is. The reference firmware reports `"latin1-cyrillic"`: its font also has the Russian alphabet (U+0410 to U+044F, Ё and ё), which that charset keeps on top of `"latin1"`; other Cyrillic letters are folded or dropped as other scripts are. Firmware from before that reports `"latin1"`, and older firmware still `"ascii"`. A plugin older than `latin1-cyrillic` does not know it and leaves the text unfolded: Russian then shows, but typographic quotes, dashes and emoji that it would have folded draw as `?`. Update the plugin before the firmware. Firmware built with the Chinese font (`HG_CJK_FONT`, [cjk.md](cjk.md)) reports `"cjk"`: Latin-1 plus Chinese, Japanese kana, Korean and fullwidth characters are kept, and the rest folds as for `"latin1"`.
@@ -241,7 +249,7 @@ Reply text is already shaped for the device: Markdown is stripped and the text i
 
 `format` is `"pcm16"` (little-endian mono samples) unless the device lists `"opus"` in `caps.speaker.formats`: then the server may send `"opus"`, and each binary frame carries one Opus packet (mono, at `rate`, one 40 ms frame; the last frame of a reply is padded with silence). The plugin sends Opus at 24 kbps when the host has libopus, about a tenth of PCM16 at 16 kHz, and falls back to PCM16 without it.
 
-The server resamples to the device's declared speaker rate. It also paces frames to real time, at most half of `caps.speaker.buffer_ms` ahead, and never less than 0.5 s or more than 3 s. A device that doesn't announce its buffer gets the 0.5 s lead, so a jitter buffer of about 1 s is enough for it. A new `audio.start` replaces the stream that is playing.
+The server resamples to the device's declared speaker rate. It also paces frames to real time, at most half of `caps.speaker.buffer_ms` ahead, and never less than 0.5 s or more than 3 s. A device that doesn't announce its buffer gets the 0.5 s lead, so a jitter buffer of about 1 s is enough for it. A new `audio.start` replaces the stream that is playing. The same stream carries audio the agent plays with `gadget_play`, which can last an hour: `seq` wraps at 65536 and the device does not check it. When the device starts a recording (`audio.start` from the device), the server stops the stream it was sending, with `audio.abort`.
 
 ### Display
 
@@ -253,6 +261,28 @@ The server resamples to the device's declared speaker rate. It also paces frames
 
 The server fits images inside `caps.display.image` before sending them, so devices never decode JPEG or PNG. A device that can't show images (such as a board whose framebuffer holds only a band of rows) leaves `image` out of `caps.display`.
 
+#### Structured cards
+
+A device that sends `caps.card` also takes these optional fields in `display`:
+
+```json
+{"type": "display", "id": "build", "title": "Build", "body": "Compiling", "ttl_s": 0,
+ "items": ["core", "simulator"], "progress": 40}
+```
+
+| Field | Meaning |
+|---|---|
+| `items` | List rows, shown one line each after the body. The device keeps the first `caps.card.items` and cuts a row that is longer than its line |
+| `progress` | A progress bar, 0 to 100; other numbers are held to that range |
+| `qr` | Text the device draws as a QR code, in the content area, with `body` as a caption where it fits. The device draws the code only: `items` are not shown with it, and `progress` is a thin bar above it, so the code is as large with a bar as without |
+| `id` | Names the card. A `display` with the `id` of the card on screen replaces it in place: the reader keeps their place in a long list. Any other `display` starts a new card from its top |
+
+- Text is shaped like replies: folded to the device's `charset`, and each row is one line of at most `text_cols` less 2 characters, the room a row has after its bullet. `qr` is sent exactly as given.
+- The server sends these fields only to a device with `caps.card`. Any other device gets the same content as a plain card: a text bar for the progress (`[####------] 40%`), the body, one `* ` line for each item and the code's text. A `qr` longer than `caps.card.qr` bytes is sent as text in `body` too. So older firmware and other clients show everything, in words.
+- A device that gets a `qr` it cannot draw (it does not encode, or it does not fit the screen) shows its text after the body.
+- The reference firmware encodes a code at medium error correction, up to version 12 (287 bytes). It draws a module at 3 pixels or more with a four-module quiet zone, or at 2 pixels with a two-module quiet zone where that is all that fits, and announces in `caps.card.qr` the largest code that fits its screen that way: 84 bytes on a 240x135 panel.
+- A structured card waits while the screen is dark, as any card does; see [Screen sleep](#screen-sleep).
+
 ### Screen sleep
 
 A device whose screen goes dark (a timeout, the power key, or lying face down) tells the server, and the server holds back screen updates until the screen lights up again. This saves the radio time and the screen wake-ups that cards and images would otherwise cost while nobody is looking.
@@ -261,7 +291,7 @@ A device whose screen goes dark (a timeout, the power key, or lying face down) t
 - While the screen is dark the server keeps the latest `display` card or image (a newer one replaces an older one, as it would on screen), the latest `status` phrase and the latest `dashboard`, and sends none of them.
 - When the screen lights up, the server sends the held `status` phrase, then the held `dashboard`, then the held card or image. A card or image with a `ttl_s` keeps only the time it has left, counted from when it was sent, and one whose time ran out is dropped. A held status phrase is dropped when its turn ends. A held dashboard is dropped when a newer one goes out first, and is not sent to a device that is unpaired or that reconnects without `caps.dashboard`.
 - What is held survives a reconnect: it goes out once the device connects with its screen lit.
-- Everything else is sent at once: `prompt` and `prompt.close`, `pairing`, turns, transcripts, replies, audio, `notice`, actions and firmware updates. A question or a reply still lights the screen, except while the device lies face down: then it waits for the device to be turned over.
+- Everything else is sent at once: `prompt` and `prompt.close`, `choice` and `choice.close`, `pairing`, turns, transcripts, replies, audio, `notice`, actions and firmware updates. A question or a reply still lights the screen, except while the device lies face down: then it waits for the device to be turned over.
 - A device that never sends `display_sleeping` counts as lit, so nothing is held back for it.
 
 ### Dashboard
@@ -298,6 +328,27 @@ Hermes asks before some actions: destructive commands such as `/new`, a costly m
 - The server sends one question at a time. A question asked while a device was offline is sent again when it reconnects.
 - Text is shaped like replies: short, plain and already folded to the device's charset. A dangerous-command approval is the exception: its text is the command as it will run, unchanged, or a notice to approve on the host when the command doesn't fit one line of `text_cols`, less two columns, as-is. The server ignores a yes to that notice.
 
+#### Choices
+
+A device that sends `caps.choice` also takes a question with a few answers. The agent asks it, through the plugin's `gadget_ask` tool; Hermes's own confirmations stay yes/no `prompt` messages.
+
+```json
+{"type": "choice", "id": "c1", "title": "Which list?", "options": ["Groceries", "Hardware", "Pharmacy"], "ttl_s": 60}
+```
+
+- `options` has 2 to `caps.choice.options` answers, each one line, shaped like replies. A device ignores a choice with fewer than 2, or with an option that is not a string, and keeps the first `caps.choice.options` of a longer list, so an `index` always counts in the list as it was sent.
+- `title` is the question, one line of text. The device shows it whole in up to `caps.choice.title_lines` lines of `title_cols` characters; the server cuts a longer one to fit, ending in `...`. The reference firmware puts a question that fits its header there, and wraps a longer one above the answers, in up to four lines and never so many that fewer than two answers stay on screen.
+- The device answers exactly once with `choice.reply`: `index`, the picked option counted from 0, or `cancelled: true`. It sends nothing when the choice expires (`ttl_s`, when present) or is withdrawn with `choice.close`.
+- The server sends one choice at a time to a device and ignores a reply whose `id` is not the choice it is waiting on or whose `index` is not one of its options. When nobody answers in time it sends `choice.close`. A choice ends when the connection drops; it is not asked again.
+- A choice is sent at once and lights the screen, like a question. A `prompt` that arrives meanwhile is shown first; the choice comes back when it is answered.
+- A server sends `choice` only to a device with `caps.choice`. The Hermes plugin shows any other device the options as a numbered plain card and tells the agent to ask for the answer by voice.
+- The reference firmware shows the answers as a list and ignores presses in the first 0.6 s after the list comes to the front: when it arrives, and again when it comes back from under a question, a recording or a battery alert. A choice, like a question, closes the profile grid.
+  - a touchscreen: a tap on a row answers it, a swipe down cancels, and a swipe up shows the next rows of a list longer than the screen;
+  - Up and Down buttons, or a knob: they move the highlight, TALK answers and CANCEL cancels;
+  - TALK and CANCEL alone: CANCEL moves to the next row, TALK answers, and a last row, Cancel, cancels.
+
+  A board with only a TALK button and no touchscreen sends no `caps.choice`.
+
 ### Device actions
 
 | Message | Direction |
@@ -316,7 +367,31 @@ A device with a camera may advertise `camera.capture` in `hello.actions`; it tak
 {"format":"rgb565le","width":640,"height":512,"image_b64":"<base64>"}
 ```
 
-`image_b64` is Base64-encoded, tightly packed, row-major RGB565 pixels in little-endian byte order, with no row padding. For the 7B port, the maximum dimensions are 640×512 (655,360 decoded bytes; 873,816 Base64 characters). The full result stays below the gateway's current 1 MiB action-frame limit. Other camera ports must keep the serialized result within their transport's frame limit. On capture failure, the device uses the existing `action.result` error form; no new message type is introduced. The plugin saves a successful result as a PNG under `~/.hermes/gadgetpix/` and gives the agent the file's path, width, height and size, never `image_b64`.
+`image_b64` is Base64-encoded, tightly packed, row-major RGB565 pixels in little-endian byte order, with no row padding. For the 7B port, the maximum dimensions are 640×512 (655,360 decoded bytes; 873,816 Base64 characters). For the CoreS3 port, the maximum dimensions are 640×480 (614,400 decoded bytes; 819,200 Base64 characters). The full result stays below the gateway's current 1 MiB action-frame limit. Other camera ports must keep the serialized result within their transport's frame limit. On capture failure, the device uses the existing `action.result` error form; no new message type is introduced. The plugin saves a successful result as a PNG under `~/.hermes/gadgetpix/` and gives the agent the file's path, width, height and size, never `image_b64`.
+
+#### The `face.set` action
+
+A device with a display advertises `face.set` in `hello.actions`. It gives the face on the screen an expression:
+
+| Argument | Meaning |
+|---|---|
+| `expression` | Required: `neutral`, `happy`, `confused`, `alert` or `sleepy`. `neutral` clears the expression |
+| `seconds` | Optional, an integer from 1 to 3600: the face goes back to neutral after that long |
+
+```json
+{"type": "action", "id": "x2", "name": "face.set", "args": {"expression": "happy", "seconds": 10}}
+{"type": "action.result", "id": "x2", "ok": true, "result": {"expression": "happy", "seconds": 10}}
+```
+
+- Without `seconds`, the expression lasts until the user's next turn. That is one of three things the user does on the device, in any state: starting a recording (even one that is then discarded), sending a typed message, or starting a new session. Nothing else ends it: not the reply to the turn it was set in, and not a turn Hermes starts by itself (`turn.start` with no recording or message before it, as for a device event that notifies Hermes).
+- With `seconds`, the user's next turn still ends it, when that comes first.
+- A new `face.set` replaces the expression and its time. A restart forgets it; a lost connection does not.
+- The device draws the expression on its idle, thinking and speaking screens. On any other screen, and while the screen is off or shows the resting clock, it is kept but not drawn. The action does not wake the screen.
+- An unknown `expression`, or `seconds` that is not an integer from 1 to 3600 (2.9 and `"10"` are refused, not rounded), fails with `ok: false` and changes nothing.
+- The mark beside the head moves for 60 s after each `face.set`, then stands still for as long as the expression lasts.
+- While an expression is set, the console's `status` carries it as `expression`.
+
+[The mascot](architecture.md#the-mascot) says what each expression looks like.
 
 ### Telemetry and events (device → server)
 
@@ -362,6 +437,18 @@ mac = HMAC-SHA256(key, "hermes-gadget/v1|ota|" + device_id + "|" + nonce + "|" +
 - The server keeps at most 64 KB unacknowledged. Frames carry consecutive sequence numbers from 0; a gap abandons the update (`sequence`).
 - An update that gets no data for 30 s is abandoned (`timeout`), and so is one whose connection drops.
 - The new firmware boots on probation. If it doesn't reach a server (`welcome`) within 5 minutes, or crashes first, the device goes back to the previous firmware.
+
+### Diagnostics
+
+| Message | Direction |
+|---|---|
+| `{"type": "diag", "id": "d1"}` | server → device |
+| `{"type": "diag", "id": "d1", "report": {...}, "log": "I (1234) hg: ...\n..."}` | device → server |
+
+- `report` is the object the serial console's `diag` command prints after `@diag `: firmware, connection history, recordings and what the port adds, such as memory, reset reason and task stacks. Its fields follow the firmware and are meant for people reading a bug report, not for programs.
+- `log` is the device's recent log, oldest line first, or empty when the device keeps none. A device may keep only the newest part of a long log; the reference firmware sends at most 16 KB, from the start of a line.
+- The device echoes `id` when the request has one. It answers whether or not it is paired.
+- The server waits about 8 s. Firmware from before this message ignores it, so no answer means the report has to come over USB.
 
 ### Heartbeat
 

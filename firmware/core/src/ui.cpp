@@ -104,7 +104,7 @@ int isqrt(int64_t v) {
 // The edge ring's angles are in 1/64 degree: a whole turn, and the comet's tail.
 constexpr int32_t kTurn64 = 360 * 64;
 constexpr int32_t kTail64 = 70 * 64;
-// Listening turns amber in the last sixth of the recording limit: its last 5 of 30 s.
+// Listening turns amber in the last sixth of the recording limit: its last 10 of 60 s.
 constexpr int16_t kLateListening = 834;
 
 // The resting clock's burn-in shift: each minute the face moves (dx, dy) px, each -4 to 4,
@@ -192,12 +192,12 @@ EdgeRing edge_ring(const UiModel& m) {
     return r;
   }
   switch (m.screen) {
-    case Screen::Thinking: comet(24, kBlue); break;
+    case Screen::Thinking: if (m.animate) comet(24, kBlue); break;
     case Screen::Responding:
-      if (m.speaking) comet(40, kAccent);
+      if (m.speaking && m.animate) comet(40, kAccent);
       break;
     case Screen::Boot:
-    case Screen::Connecting: comet(24, kAccent); break;
+    case Screen::Connecting: if (m.animate) comet(24, kAccent); break;
     default: break;
   }
   return r;
@@ -238,8 +238,31 @@ int tri(uint32_t frame, int period) {
   return p < period / 2 ? p : period - p;
 }
 
+// The expression a hero screen shows: the model's on the idle, thinking and speaking screens.
+mascot::Expression expression(const UiModel& m) {
+  switch (m.screen) {
+    case Screen::Ready:
+    case Screen::Thinking:
+    case Screen::Responding:
+      return m.expression;
+    default:
+      return mascot::Expression::Neutral;
+  }
+}
+
+// The step of an expression's mark: it changes twice a second, and stands still with animation
+// off and once the app says it has moved for long enough.
+int mark_phase(const UiModel& m) {
+  return m.animate && !m.expression_still ? static_cast<int>((m.frame / 5) % 2) : 0;
+}
+
 mascot::Frame mascot_frame(const UiModel& m) {
+  // With animation off the Updating mascot never blinks, so the screen stands still.
+  if (m.screen == Screen::Updating && !m.animate) return mascot::Frame::Idle;
   mascot::Frame f = m.frame % 45 < 2 ? mascot::Frame::Blink : mascot::Frame::Idle;  // blink every ~4.5 s
+  // Sleepy keeps the eyes shut; alert keeps them open, with the mouth open too.
+  if (expression(m) == mascot::Expression::Sleepy) f = mascot::Frame::Blink;
+  if (expression(m) == mascot::Expression::Alert) f = mascot::Frame::Talk;
   if (m.screen == Screen::Responding && m.speaking) f = (m.frame / 2) % 2 ? mascot::Frame::Talk : mascot::Frame::Idle;
   const bool still = m.face && m.face->rgb565 && !m.face->band(f).rows;  // a colour face without that frame
   return still ? mascot::Frame::Idle : f;
@@ -260,11 +283,19 @@ void draw_face(Canvas& c, int x, int y, const mascot::Bitmap& b, const mascot::F
 uint32_t hero_anim_key(const UiModel& m) {
   Hash h;
   h.val(mascot_frame(m));
+  const mascot::Expression e = expression(m);
+  if (e != mascot::Expression::Neutral) h.val(e).val(mark_phase(m));
   switch (m.screen) {
     case Screen::Listening: h.val(m.frame % 3).val(m.level / 20); break;
     case Screen::Thinking:
+      if (e == mascot::Expression::Neutral) h.val((m.frame / 2) % 4);  // the mark takes the dots' place
+      break;
     case Screen::Connecting:
-    case Screen::Updating: h.val((m.frame / 2) % 4); break;
+      h.val((m.frame / 2) % 4);
+      break;
+    case Screen::Updating:
+      if (m.animate) h.val((m.frame / 2) % 4);
+      break;
     case Screen::Responding: h.val((m.frame / 2) % 3); break;
     default: break;
   }
@@ -316,6 +347,7 @@ const char* screen_name(Screen s) {
     case Screen::Prompt: return "prompt";
     case Screen::Updating: return "updating";
     case Screen::Settings: return "settings";
+    case Screen::Camera: return "camera";
     case Screen::Setup: return "setup";
     case Screen::Dashboard: return "dashboard";
     case Screen::Profiles: return "profiles";
@@ -324,6 +356,7 @@ const char* screen_name(Screen s) {
     case Screen::LowBattery: return "low_battery";
     case Screen::Charging: return "charging";
     case Screen::Charged: return "charged";
+    case Screen::Choice: return "choice";
   }
   return "unknown";
 }
@@ -592,6 +625,11 @@ void Ui::draw_frame(const UiModel& m) {
   Hash content;
   content.val(m.screen).add(m.detail).add(m.body).add(m.code).val(m.scroll).val(m.color_test)
       .val(m.qr ? m.qr->size : 0);
+  if (!m.items.empty() || m.card_progress >= 0 || m.card_qr) {
+    content.val(m.card_progress).val(m.item_sel);
+    for (const std::string& item : m.items) content.add(item);
+    if (m.card_qr) content.add(m.card_qr->modules.data(), m.card_qr->modules.size());
+  }
   for (const DashRow& row : m.dash) content.add(row.label).add(row.value).val(row.tone).val(row.heading);
   if (m.screen == Screen::Settings) {
     content.val(m.settings_sel).val(m.settings_scroll);
@@ -617,10 +655,12 @@ void Ui::draw_frame(const UiModel& m) {
     int y0 = y_header, y1 = y_bottom;
     bool redraw = !valid_ || !hero_valid_ || stat != hero_static_;
     if (!redraw && anim != hero_anim_) {
-      hero_anim_rows(m, y0, y1);  // only what can move
+      hero_anim_rows(m, hero_expression_, hero_frame_, y0, y1);  // only what can move
       redraw = true;
     }
     if (redraw) draw_bands(y0, y1, &Ui::draw_hero, m);
+    hero_expression_ = expression(m);
+    hero_frame_ = mascot_frame(m);
     hero_static_ = stat;
     hero_anim_ = anim;
     hero_valid_ = true;
@@ -649,8 +689,9 @@ void Ui::draw_frame(const UiModel& m) {
       hash_[i] = 0;
       continue;
     }
-    // An image owns the area between the bars; the app draws and flushes it.
-    if (m.screen == Screen::Image && (i == 1 || i == 2)) {
+    // An image owns the area between the bars; the app draws and flushes it. The
+    // camera screen does too (the port paints the live view there; see App::camera_draw).
+    if ((m.screen == Screen::Image || m.screen == Screen::Camera) && (i == 1 || i == 2)) {
       hash_[i] = 0;
       continue;
     }
@@ -809,8 +850,14 @@ void Ui::draw_indicator(Canvas& c, const UiModel& m, int cx, int cy, int r) {
   switch (m.screen) {
     case Screen::Boot:
     case Screen::Connecting:
-    case Screen::Updating:
       spinner(kAccent);
+      break;
+    case Screen::Updating:
+      if (m.animate) spinner(kAccent);
+      else {
+        c.ring(cx, cy, r, s + 1, kAccent);
+        c.fill_circle(cx, cy, r / 3, kAccentDim);
+      }
       break;
     case Screen::Thinking:
       spinner(kBlue);
@@ -844,6 +891,7 @@ void Ui::draw_indicator(Canvas& c, const UiModel& m, int cx, int cy, int r) {
     case Screen::Card:
       c.fill_round_rect(cx - r, cy - r, 2 * r, 2 * r, r / 3, kAccent);
       break;
+    case Screen::Choice:
     case Screen::Prompt: {
       c.fill_circle(cx, cy, r, kAccent);
       int tw = Canvas::text_width("?", s);
@@ -860,6 +908,7 @@ void Ui::draw_indicator(Canvas& c, const UiModel& m, int cx, int cy, int r) {
       break;
     }
     case Screen::Image:
+    case Screen::Camera:  // the area between the bars belongs to the camera/App; see draw_frame
     case Screen::Settings:
     case Screen::Setup:
     case Screen::Profiles:
@@ -883,9 +932,13 @@ void Ui::draw_header(Canvas& c, const UiModel& m) {
   draw_indicator(c, m, cx, cy, r);
   int tx = cx + r + 4 * s;
   int hs = s + 1;
-  int cols = cols_for(info_.width - tx - 2 * s, hs);
-  c.text(tx, cy - (font::kGlyphHeight * hs) / 2, fit(m.headline, cols), hs, kText);
+  c.text(tx, cy - (font::kGlyphHeight * hs) / 2, fit(m.headline, header_cols()), hs, kText);
   c.fill_rect(4 * s, y0 + hh - 1, info_.width - 8 * s, 1, kFaint);
+}
+
+int Ui::header_cols() const {
+  const int s = layout_.scale, r = layout_.header_h / 2 - 2 * s;
+  return cols_for(info_.width - (4 * s + r + r + 4 * s) - 2 * s, s + 1);  // as draw_header lays it out
 }
 
 int Ui::body_rows(const UiModel& m) const {
@@ -916,6 +969,14 @@ void Ui::draw_content(Canvas& c, const UiModel& m) {
     return;
   }
 
+  if (m.screen == Screen::Card && card_rich(m)) {
+    draw_card(c, m, y0, y1);
+    return;
+  }
+  if (m.screen == Screen::Choice) {
+    draw_choice(c, m, y0, y1);
+    return;
+  }
   if (m.qr && m.qr->ok() && draw_qr(c, m, y0, y1)) return;
   if (m.screen == Screen::Dashboard) {
     draw_dashboard(c, m, y0, y1);
@@ -1016,6 +1077,205 @@ void Ui::draw_dashboard(Canvas& c, const UiModel& m, int y0, int y1) {
     const int thumb_y = track_y + (track_h - thumb_h) * first / std::max(1, max_first);
     c.fill_rect(w - 2 * s, track_y, s, track_h, kFaint);
     c.fill_rect(w - 2 * s, thumb_y, s, thumb_h, kDim);
+  }
+}
+
+// --- Structured cards and choices (docs/protocol.md#display, #questions) ---
+
+namespace {
+
+// A card's progress bar and its percentage take one text line and a gap.
+int card_progress_h(bool progress, int s) { return progress ? Canvas::line_height(s) + 2 * s : 0; }
+
+// A code of `n` modules in a `w` x `h` box: the pixels per module, or 0 when it does not fit. It
+// keeps the standard four-module quiet zone where modules still get 3 px, else two modules of it
+// and 2 px a module, below which a phone camera does not read the panel.
+int qr_fit(int n, int w, int h, int& pad) {
+  pad = 4;
+  int scale = std::min(w, h) / (n + 2 * pad);
+  if (scale >= 3) return scale;
+  pad = 2;
+  scale = std::min(w, h) / (n + 2 * pad);
+  return scale >= 2 ? scale : 0;
+}
+
+}  // namespace
+
+int Ui::card_lines(const UiModel& m) const {
+  const int body = m.body.empty() ? 0 : static_cast<int>(wrap_text(m.body, layout_.body_cols).size());
+  return body + static_cast<int>(m.items.size());
+}
+
+int Ui::card_rows(const UiModel& m) const {
+  const int s = layout_.scale;
+  const int content_h = info_.height - layout_.top_h - layout_.header_h - layout_.bottom_h;
+  return std::max(1, (content_h - 4 * s - card_progress_h(m.card_progress >= 0, s)) / Canvas::line_height(s));
+}
+
+int Ui::card_qr_scale(int modules) const {
+  const int s = layout_.scale;
+  const int content_h = info_.height - layout_.top_h - layout_.header_h - layout_.bottom_h;
+  int pad = 0;
+  return qr_fit(modules, info_.width - 8 * s, content_h - 8 * s, pad);
+}
+
+int Ui::card_qr_version() const {
+  for (int v = qr::kMaxVersion; v >= 1; --v)
+    if (card_qr_scale(17 + 4 * v)) return v;
+  return 0;
+}
+
+// A structured card: a progress bar, then either a code with the body as its caption, or the
+// body's lines and the list's rows, scrolled together from line `scroll`. Over a code the
+// progress is a thin bar in the top margin, so the code is as large with it as without.
+void Ui::draw_card(Canvas& c, const UiModel& m, int y0, int y1) {
+  const int s = layout_.scale, w = info_.width, margin = 4 * s, lh = Canvas::line_height(s);
+  const int glyph_h = font::kGlyphHeight * s;
+  const bool code = m.card_qr && m.card_qr->ok() && card_qr_scale(m.card_qr->size) > 0;
+  int y = y0 + margin;
+  if (m.card_progress >= 0 && code) {
+    const int pct = std::min<int>(100, m.card_progress), bar_w = w - 2 * margin, bar_h = std::max(2, s);
+    c.fill_rect(margin, y0 + s, bar_w, bar_h, kFaint);
+    c.fill_rect(margin, y0 + s, bar_w * pct / 100, bar_h, pct >= 100 ? kGreen : kAccent);
+  } else if (m.card_progress >= 0) {
+    const int pct = std::min<int>(100, m.card_progress);
+    const std::string label = std::to_string(pct) + "%";
+    const int bar_w = w - 2 * margin - Canvas::text_width("100%", s) - 2 * s, bar_h = std::max(3, glyph_h / 2);
+    const int by = y + (glyph_h - bar_h) / 2, fill = bar_w * pct / 100;
+    const uint16_t ink = pct >= 100 ? kGreen : kAccent;
+    c.fill_round_rect(margin, by, bar_w, bar_h, bar_h / 2, kFaint);
+    if (fill > 0) c.fill_round_rect(margin, by, std::max(fill, bar_h), bar_h, bar_h / 2, ink);
+    c.text(w - margin - Canvas::text_width(label, s), y, label, s, ink);
+    y += card_progress_h(true, s);
+  }
+  if (code) {
+    const int n = m.card_qr->size, avail_w = w - 2 * margin, avail_h = y1 - y - margin;
+    // The caption stays only where the code is as large beside it as without it.
+    std::vector<std::string> lines;
+    if (!m.body.empty()) lines = wrap_text(m.body, layout_.body_cols);
+    int pad = 0, bare_pad = 0;
+    int reserve = lines.empty() ? 0 : static_cast<int>(lines.size()) * lh + 2 * s;
+    int scale = qr_fit(n, avail_w, avail_h - reserve, pad);
+    const int bare = qr_fit(n, avail_w, avail_h, bare_pad);
+    if (bare > scale) {
+      scale = bare, pad = bare_pad, reserve = 0;
+      lines.clear();
+    }
+    if (scale > 0) {
+      const int side = (n + 2 * pad) * scale, x0 = (w - side) / 2;
+      const int py = y + std::max(0, (avail_h - side - reserve) / 2);
+      c.fill_rect(x0, py, side, side, rgb565(255, 255, 255));
+      for (int qy = 0; qy < n; ++qy)
+        for (int qx = 0; qx < n; ++qx)
+          if (m.card_qr->at(qx, qy))
+            c.fill_rect(x0 + (qx + pad) * scale, py + (qy + pad) * scale, scale, scale, rgb565(0, 0, 0));
+      int ty = py + side + 2 * s;
+      for (const std::string& line : lines) {
+        c.text((w - Canvas::text_width(line, s)) / 2, ty, line, s, kDim);
+        ty += lh;
+      }
+      return;
+    }
+  }
+  std::vector<std::string> body;
+  if (!m.body.empty()) body = wrap_text(m.body, layout_.body_cols);
+  const int n_body = static_cast<int>(body.size()), total = n_body + static_cast<int>(m.items.size());
+  const int rows = card_rows(m), max_first = std::max(0, total - rows);
+  const int first = std::max(0, std::min(m.scroll, max_first));
+  const int r = std::max(1, glyph_h / 4), item_x = margin + 2 * r + 3 * s;
+  const int item_cols = cols_for(w - margin - item_x - (total > rows ? 2 * s : 0), s);
+  for (int i = 0; i < rows && first + i < total; ++i) {
+    const int line = first + i, ty = y + i * lh;
+    if (line < n_body) {
+      c.text(margin, ty, body[static_cast<size_t>(line)], s, m.items.empty() ? kText : kDim);
+      continue;
+    }
+    c.fill_circle(margin + r, ty + glyph_h / 2, r, kAccent);
+    c.text(item_x, ty, fit(m.items[static_cast<size_t>(line - n_body)], item_cols), s, kText);
+  }
+  if (total > rows) {
+    const int track_h = rows * lh, thumb_h = std::max(2 * s, track_h * rows / total);
+    c.fill_rect(w - 2 * s, y, s, track_h, kFaint);
+    c.fill_rect(w - 2 * s, y + (track_h - thumb_h) * first / std::max(1, max_first), s, thumb_h, kDim);
+  }
+}
+
+// A Choice row is a line of text with room around it, and a finger's height on a touchscreen.
+int Ui::choice_row_h() const {
+  const int s = layout_.scale;
+  return std::max(Canvas::line_height(s) + 2 * s, touch_px_ * 2 / 3);
+}
+
+// A long question gets up to four lines, fewer where two answers would not fit under them.
+int Ui::choice_question_lines() const {
+  const int s = layout_.scale;
+  const int content_h = info_.height - layout_.top_h - layout_.header_h - layout_.bottom_h;
+  return std::max(0, std::min(4, (content_h - 4 * s - 2 * choice_row_h()) / Canvas::line_height(s)));
+}
+
+std::vector<std::string> Ui::choice_question(const UiModel& m) const {
+  std::vector<std::string> lines;
+  const int max = choice_question_lines();
+  if (m.detail.empty() || max <= 0) return lines;
+  lines = wrap_text(m.detail, layout_.body_cols);
+  if (static_cast<int>(lines.size()) > max) {
+    lines.resize(static_cast<size_t>(max));
+    lines.back() = fit(lines.back() + "...", layout_.body_cols);  // cut: the line ends in ".."
+  }
+  return lines;
+}
+
+int Ui::choice_list_top(const UiModel& m) const {
+  const int s = layout_.scale, lines = static_cast<int>(choice_question(m).size());
+  return layout_.top_h + layout_.header_h + s + (lines ? lines * Canvas::line_height(s) + 2 * s : 0);
+}
+
+int Ui::choice_rows(const UiModel& m) const {
+  return std::max(1, (info_.height - layout_.bottom_h - layout_.scale - choice_list_top(m)) / choice_row_h());
+}
+
+int Ui::choice_row_hit(const UiModel& m, int x, int y) const {
+  if (m.screen != Screen::Choice) return -1;
+  const int total = static_cast<int>(m.items.size()), rows = choice_rows(m);
+  const int first = std::max(0, std::min(m.scroll, std::max(0, total - rows)));
+  const int top = oy_ + choice_list_top(m);
+  if (x < ox_ || x >= ox_ + info_.width || y < top) return -1;
+  const int row = (y - top) / choice_row_h();
+  return row < rows && first + row < total ? first + row : -1;
+}
+
+// The answers to a choice: one row each, the selected one on a bar, under the question's
+// lines when it is too long for the header.
+void Ui::draw_choice(Canvas& c, const UiModel& m, int y0, int y1) {
+  const int s = layout_.scale, w = info_.width, margin = 4 * s;
+  const int glyph_h = font::kGlyphHeight * s, row_h = choice_row_h();
+  const int total = static_cast<int>(m.items.size()), rows = choice_rows(m);
+  int qy = y0 + s;
+  for (const std::string& line : choice_question(m)) {
+    c.text(margin, qy, line, s, kText);
+    qy += Canvas::line_height(s);
+  }
+  y0 = choice_list_top(m) - s;
+  const int max_first = std::max(0, total - rows);
+  const int first = std::max(0, std::min(m.scroll, max_first));
+  const bool scrolls = total > rows;
+  const int right = w - margin - (scrolls ? 2 * s : 0);
+  const int r = std::max(1, glyph_h / 4), text_x = margin + 2 * r + 3 * s;
+  int y = y0 + s;
+  for (int i = 0; i < rows && first + i < total; ++i, y += row_h) {
+    const int idx = first + i;
+    const bool sel = idx == m.item_sel;
+    const int ty = y + (row_h - glyph_h) / 2;
+    if (sel) c.fill_round_rect(2 * s, y, right - 2 * s + margin / 2, row_h, 2 * s, kBar);
+    else if (touch_px_ && i && idx - 1 != m.item_sel) c.fill_rect(margin, y, right - margin, 1, kFaint);  // rows are targets
+    c.fill_circle(margin + r, ty + glyph_h / 2, r, sel ? kAccent : kFaint);
+    c.text(text_x, ty, fit(m.items[static_cast<size_t>(idx)], cols_for(right - text_x, s)), s, sel ? kAccent : kText);
+  }
+  if (scrolls) {
+    const int track_y = y0 + s, track_h = std::min(rows * row_h, y1 - track_y);
+    const int thumb_h = std::max(2 * s, track_h * rows / total);
+    c.fill_rect(w - 2 * s, track_y, s, track_h, kFaint);
+    c.fill_rect(w - 2 * s, track_y + (track_h - thumb_h) * first / std::max(1, max_first), s, thumb_h, kDim);
   }
 }
 
@@ -1236,6 +1496,7 @@ constexpr uint8_t kSettingIcons[][8] = {
     {0x0C, 0x18, 0x30, 0x7E, 0x0C, 0x18, 0x30, 0x00},  // Bolt
     {0x00, 0x01, 0x03, 0x86, 0xCC, 0x78, 0x30, 0x00},  // Check
     {0xDB, 0xDB, 0x00, 0xDB, 0xDB, 0x00, 0xDB, 0xDB},  // Grid
+    {0x18, 0x7E, 0x81, 0xBD, 0xA5, 0x81, 0x7E, 0x18},  // Camera
 };
 
 void draw_icon(Canvas& c, int x, int y, SettingRow::Icon icon, int scale, uint16_t color) {
@@ -1504,7 +1765,8 @@ Ui::HeroGeom Ui::hero_geom(const UiModel& m) const {
   const int reserved = m.screen == Screen::Responding ? max_lines : 1;
   const int ch = caption_h(std::max<int>(reserved, static_cast<int>(g.detail.size()))) + std::max(0, g.name_h - (2 * lh + s));
   const int avail = std::min(w - 8 * s, layout_.main_h - ch - buttons_h - 4 * s);
-  g.size = mascot::pick(avail, mascot::Frame::Idle)->size;
+  const int limit = panel_.mascot_px ? std::min(avail, static_cast<int>(panel_.mascot_px)) : avail;
+  g.size = mascot::pick(limit, mascot::Frame::Idle)->size;
   const int block = g.size + 2 * s + ch + buttons_h;
   g.x = (w - g.size) / 2;
   g.y = layout_.main_y + std::max(s, (layout_.main_h - block) / 2);
@@ -1520,10 +1782,56 @@ bool Ui::talk_caption_fits() const {
   return hero_geom(m).size > mascot::pick(0, mascot::Frame::Idle)->size;
 }
 
-void Ui::hero_anim_rows(const UiModel& m, int& y0, int& y1) const {
+Ui::Rect Ui::mark_rect(const HeroGeom& g, const mascot::Anchors& a) const {
+  const int k = std::max(1, (g.size + 16) / 40);  // the mark's text scale: 2 at 64 px, 5 at 192
+  const int w = 7 * k, h = 8 * k;
+  // Above the anchor like the thinking dots, and kept on the panel and under the top bar.
+  const int x = std::min(g.x + g.size * a.head_top_right.x / 1000, static_cast<int>(info_.width) - w);
+  const int y = std::max(g.y + g.size * a.head_top_right.y / 1000 - 7 * k, layout_.top_h + 1);
+  return {x, y, w, h};
+}
+
+// A glyph or two in a 7k x 8k box: a pair of sparkles, "?", "!" or "zZ". Each has two steps (mark_phase).
+void Ui::draw_mark(Canvas& c, const UiModel& m, const Rect& r) {
+  const int k = r.w / 7, phase = mark_phase(m);
+  // A glyph's top row at y, whatever the font: the CJK build draws narrow glyphs lower in their
+  // line, which would hang them below the box that a step of the mark redraws.
+  auto glyph = [&](int x, int y, const char* s, int scale, uint16_t color) {
+    c.text(x, y - font::kAsciiYOffset * scale, s, scale, color);
+  };
+  switch (expression(m)) {
+    case mascot::Expression::Happy: {
+      // Two four-point sparkles that swap sizes.
+      auto sparkle = [&](int cx, int cy, int arm) {
+        c.fill_rect(cx - k / 2, cy - arm, k, 2 * arm + 1, kAccent);
+        c.fill_rect(cx - arm, cy - k / 2, 2 * arm + 1, k, kAccent);
+      };
+      sparkle(r.x + 2 * k, r.y + 5 * k, phase ? k : 2 * k);
+      sparkle(r.x + 5 * k, r.y + 2 * k, phase ? 2 * k : k);
+      break;
+    }
+    case mascot::Expression::Confused:
+      glyph(r.x + (phase ? k : 0), r.y, "?", k, kBlue);  // tilts from side to side
+      break;
+    case mascot::Expression::Alert:
+      glyph(r.x, r.y, "!", k, phase ? kRedDim : kRed);
+      break;
+    case mascot::Expression::Sleepy: {
+      const int small = std::max(1, k / 2);
+      glyph(r.x, r.y + r.h - 7 * small, "z", small, kDim);
+      glyph(r.x + 3 * small, r.y, "Z", std::max(1, k - small), phase ? kDim : kFaint);
+      break;
+    }
+    case mascot::Expression::Neutral: break;
+  }
+}
+
+void Ui::hero_anim_rows(const UiModel& m, mascot::Expression was, mascot::Frame was_frame, int& y0,
+                        int& y1) const {
   const HeroGeom g = hero_geom(m);
   const int size = g.size, my = g.y;
   const mascot::Anchors& a = mascot::anchors(m.face);
+  const mascot::Expression now = expression(m);
   // A colour face's band, as the rows Canvas::picture draws it on at `size`.
   auto band_rows = [&](mascot::Frame frame, int& lo, int& hi) {
     if (!m.face || !m.face->rgb565 || !m.face->band(frame).rows) return;
@@ -1534,6 +1842,12 @@ void Ui::hero_anim_rows(const UiModel& m, int& y0, int& y1) const {
   };
   int top = my + size * a.eyes_y0 / 1000, bottom = my + size * a.eyes_y1 / 1000;
   band_rows(mascot::Frame::Blink, top, bottom);
+  // A step of an expression's mark with the face's frame as it was: the eyes stay out of it.
+  if (now != mascot::Expression::Neutral && now == was && mascot_frame(m) == was_frame) {
+    const Rect r = mark_rect(g, a);
+    top = r.y;
+    bottom = r.y + r.h;
+  }
   auto add = [&](int lo, int hi) {
     top = std::min(top, lo);
     bottom = std::max(bottom, hi);
@@ -1554,6 +1868,8 @@ void Ui::hero_anim_rows(const UiModel& m, int& y0, int& y1) const {
       break;
     }
     case Screen::Thinking:
+      if (now != mascot::Expression::Neutral && now == was) break;  // no dots under a mark
+      [[fallthrough]];
     case Screen::Connecting:
     case Screen::Updating: {
       int ty = my + size * a.head_top_right.y / 1000;
@@ -1561,6 +1877,16 @@ void Ui::hero_anim_rows(const UiModel& m, int& y0, int& y1) const {
       break;
     }
     default: break;
+  }
+  for (mascot::Expression e : {now, was}) {
+    if (e == mascot::Expression::Neutral) continue;
+    const Rect r = mark_rect(g, a);
+    add(r.y, r.y + r.h);
+    if (e == mascot::Expression::Alert && now != was) {  // the mouth it holds open, as it opens or shuts
+      int lo = my + size * a.mouth_y0 / 1000, hi = my + size * a.mouth_y1 / 1000;
+      band_rows(mascot::Frame::Talk, lo, hi);
+      add(lo, hi);
+    }
   }
   y0 = std::max(top - 1, layout_.top_h);
   y1 = std::min(bottom + 2, static_cast<int>(info_.height) - layout_.bottom_h);
@@ -1587,12 +1913,12 @@ void Ui::draw_hero(Canvas& c, const UiModel& m) {
       c.arc(cx, cy, r, stroke, dir, col);
     }
   };
-  auto dots = [&](uint16_t on, uint16_t dim) {
+  auto dots = [&](uint16_t on, uint16_t dim, bool animate = true) {
     int r = std::max(2, size / 30);
     int gap = 3 * r;
     int tx = mx + size * a.head_top_right.x / 1000;
     int ty = my + size * a.head_top_right.y / 1000;
-    int active = static_cast<int>((m.frame / 2) % 4);
+    int active = animate ? static_cast<int>((m.frame / 2) % 4) : -1;
     for (int i = 0; i < 3; ++i) {
       c.fill_circle(tx + i * gap, ty - i * gap / 2, r, i == active ? on : dim);
     }
@@ -1611,11 +1937,14 @@ void Ui::draw_hero(Canvas& c, const UiModel& m) {
               static_cast<int>((m.frame / 2) % 3), kAccent, kAccentDim, 130);
       }
       break;
-    case Screen::Thinking: dots(kBlue, kBlueDim); break;
-    case Screen::Connecting:
-    case Screen::Updating: dots(kAccent, kAccentDim); break;
+    case Screen::Thinking:
+      if (expression(m) == mascot::Expression::Neutral) dots(kBlue, kBlueDim);
+      break;
+    case Screen::Connecting: dots(kAccent, kAccentDim); break;
+    case Screen::Updating: dots(kAccent, kAccentDim, m.animate); break;
     default: break;
   }
+  if (expression(m) != mascot::Expression::Neutral) draw_mark(c, m, mark_rect(g, a));
 
   if (const Rect r = name_rect(m); r.w) {
     c.fill_round_rect(r.x, r.y, r.w, r.h, 3 * s, kBar);

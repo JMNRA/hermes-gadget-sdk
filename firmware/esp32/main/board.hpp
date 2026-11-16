@@ -109,6 +109,7 @@ struct LcdConfig {
   int d1 = -1, d2 = -1, d3 = -1;  // QSPI data0 uses mosi
   bool round = false;
   uint8_t font_scale = 1;  // UI text scale multiplier, clamped so the scale stays 1..4 (hg::DisplayInfo)
+  uint16_t mascot_px = 0;   // largest mascot bitmap; 0 keeps the largest that fits
   // SPI data-in (the CYD wires its panel's SDO to GPIO 12); -1 when unused.
   // Last, so positional initializers written before it existed keep their meaning.
   int miso = -1;
@@ -181,17 +182,19 @@ struct CodecAudioConfig {
   float amp_supply_v = 5.0f;  // amplifier supply; the ES8311 driver sets its output level from it
   float mic_gain_db = 24.0f;
   float vad_min_rms = 500.0f;  // tap mode's speech floor for this mic (DeviceProfile::vad_min_rms)
+  bool drop_silent_recordings = false;  // vad_min_rms was measured here: hold mode drops recordings without speech
   SpeakerCodec speaker = SpeakerCodec::Es8311;
   MicCodec mic = MicCodec::Es7210;
   bool stereo32 = false;      // two 32-bit I2S slots per frame instead of one 16-bit slot
   bool rmnm_mics = false;     // the ES7210 sends four 16-bit channels R M N M; average the M slots (ws185.hpp)
   bool speaker_pa = false;    // CodecSpeaker drives `pa`, not esp_codec_dev (see CodecAudio::begin)
+  bool dac_fade_ramp = false; // ES8311 speaker only: its DAC ramps volume on mute/unmute (reg 0x37)
   bool dac_mclk = true;       // false: the ES8311 derives its clock from BCLK
   uint8_t es7210_mics = 0x03;  // ES7210_SEL_MIC1 | ES7210_SEL_MIC2
 };
 
 // Capacitive touch on the I2C bus: hold to talk, tap, swipe down to cancel.
-enum class TouchController { Cst9217, Box3, Ft5x06, Cst816, Gt911, Spd2010 };
+enum class TouchController { Cst9217, Box3, Ft5x06, Cst816, Gt911, Spd2010, Axs5106 };
 
 struct TouchConfig {
   bool enabled = false;
@@ -228,10 +231,13 @@ struct ImuConfig {
   ImuChip chip = ImuChip::Qmi8658;
 };
 
-// PCF85063 RTC on the I2C bus, keeping UTC across power loss.
+// An RTC on the I2C bus, keeping UTC across power loss.
+enum class RtcChip { Pcf85063, Rx8130 };
+
 struct RtcConfig {
   bool enabled = false;
   uint8_t addr = 0x51;
+  RtcChip chip = RtcChip::Pcf85063;
 };
 
 // A key whose level is read from a TCA9554 or PCF8574 I/O expander input (e.g.
@@ -306,6 +312,13 @@ struct LatchPowerConfig {
   int key = -1;
 };
 
+// A microSD slot wired for 4-bit SDIO (port_sdlog.cpp mirrors the device log
+// to /sdcard/hermes.log). Pins are -1 when the board has no slot.
+struct SdConfig {
+  bool enabled = false;
+  int clk = -1, cmd = -1, d0 = -1, d1 = -1, d2 = -1, d3 = -1;
+};
+
 struct BoardConfig {
   const char* name;
   LcdConfig lcd;
@@ -336,6 +349,7 @@ struct BoardConfig {
   hg::Curve battery_curve, battery_charge_curve;
   bool cores3 = false;
   bool sticks3 = false;  // the M5PM1 switches the LCD rail and the speaker amplifier
+  bool stopwatch = false;  // M5IOE1 supplies/resets/amplifier and the M5PM1 (StopWatchBoard)
   // A phone companion app over Bluetooth LE (port_ble.cpp). Experimental: needs
   // the Bluetooth lines in the board's sdkconfig.defaults and stays off until the
   // board passes the checks in docs/hardware-validation.md#bluetooth.
@@ -347,6 +361,7 @@ struct BoardConfig {
   bool tailnet = false;
   bool radio_enabled = true;  // false for the display/touch-only Tab5 bring-up
   LatchPowerConfig latch_power;
+  SdConfig sd;  // a microSD slot wired for logging (port_sdlog.cpp)
   int status_led = -1;
   // A speaker driven by the chip's own DAC, with no I2S and no codec: the pin the
   // board's amplifier input hangs off (25 = DAC channel 0, 26 = DAC channel 1),

@@ -12,12 +12,16 @@ The screenshots come from the desktop simulator, which runs the same device core
 - **Tap to talk.** A tap starts a recording and a pause in your speech ends it. Choose it with **Talk mode** in settings. [Device settings](using-gadget.md#device-settings-and-hardware-checks)
 - **Spoken replies.** Hermes reads its reply aloud on boards with a speaker, and the text shows on screen. [Enable speech](connect-hermes.md#4-enable-speech)
 - **A face that talks.** While Hermes speaks, the face moves its mouth with the reply's latest two lines under it, and the whole text follows. [The mascot](architecture.md#the-mascot)
+- **A face with moods.** The agent can make the face look happy, confused, alert or sleepy, for a few seconds or until you next talk to it. [The mascot](architecture.md#the-mascot)
 - **Interrupt and cancel.** Hold TALK to talk over a reply, tap CANCEL to discard a recording or stop a turn, and hold CANCEL for a fresh conversation. [Talk, type, and interrupt](using-gadget.md)
 - **Read a reply before the speech ends.** Tap the screen, or press Up or Down, to see the whole text at once. [Talk, type, and interrupt](using-gadget.md)
 - **A reply you missed comes back.** If the screen went dark before you read a reply, the next wake shows it again from the top. [Device settings](using-gadget.md#device-settings-and-hardware-checks)
 - **Long tasks.** Once Hermes starts a turn, the device waits up to 30 minutes for it to end, with the screen lit. [Device settings](using-gadget.md#device-settings-and-hardware-checks)
 - **Confirmation questions.** Hermes asks before risky commands; TALK or a tap means yes, CANCEL or a swipe down means no. [Confirmations](hermes-integration.md#confirmations)
 - **Cards and pictures.** The agent can put a reminder, a note or a picture on the screen. A card that arrives while the screen is dark waits for it to light. [Talk, type, and interrupt](using-gadget.md)
+- **Lists, progress and QR codes.** A card can carry a list, a progress bar that the agent updates in place, or a QR code to scan with a phone. [Lists, progress and QR codes](using-gadget.md#lists-progress-and-qr-codes)
+- **Pick an answer.** The agent can ask a question with up to six answers; tap one, or choose it with the buttons or the knob. [Pick an answer](using-gadget.md#pick-an-answer)
+- **Music, radio and sounds.** Ask Hermes to play a sound file, a podcast episode or an internet radio stream on a gadget's speaker, and to stop it. Talking to the gadget or CANCEL stops it too. Needs `ffmpeg` on the Hermes computer for anything but WAV. [Playing audio](hermes-integration.md#playing-audio)
 - **Timers.** Ask for a timer by voice. The time left shows on every screen, and the alarm beeps for a minute on boards with a speaker. [Timers](using-gadget.md#timers)
 - **Device actions.** Hermes can change the volume, the brightness or the screen language, or run actions a board adds, such as an LED. [Device actions](protocol.md#device-actions)
 - **Scheduled messages.** A Hermes cron job can deliver its result to a gadget. [Scheduled delivery](hermes-integration.md#scheduled-delivery)
@@ -94,6 +98,7 @@ The screenshots come from the desktop simulator, which runs the same device core
 - **Settings from the grid.** A gear cell after the last profile opens the settings menu. [Device settings](using-gadget.md#device-settings-and-hardware-checks)
 - **Approval in each profile.** The first time you talk to a new profile, the screen shows the command that approves the gadget there. [Profile switching](hermes-integration.md#running-against-a-profile-or-a-multiplexed-gateway)
 - **One profile per gadget.** The host can pin a device to its own profile, with its own model, memory and personality. [One profile per gadget](hermes-integration.md#one-profile-per-gadget)
+- **A gadget that leads the other Bots.** `hermes gadget bot-chat` puts a gadget in a profile's Bot Chat, where it can message the other Hermes Bots and say what they answered. [A gadget that talks to the other Bots](hermes-integration.md#a-gadget-that-talks-to-the-other-bots)
 - **Clear refusals.** A device that a profile route refuses shows "Refused by a route" and its device ID instead of waiting for a code. [Profile switching and profile routes](hermes-integration.md#profile-switching-and-profile-routes)
 
 ## The Hermes plugin and dashboards
@@ -105,7 +110,7 @@ The screenshots come from the desktop simulator, which runs the same device core
 - **Status tiles.** Put up to eight lines, such as a NAS's state, on that list from a script on the host. [The dashboard](using-gadget.md#watch-hermes-sessions-on-the-dashboard)
 - **Gadgets tab.** The Hermes web dashboard lists your devices with board, firmware, last seen, online state and battery. [The Gadgets tab](hermes-integration.md#the-gadgets-tab-in-the-hermes-dashboard)
 - **Gadgets page in Hermes Desktop.** A gadget that runs in the desktop app's window, pairing with one click, a live copy of each device's screen, and buttons to send a card or run an action. [The Gadgets page](hermes-integration.md#the-gadgets-page-in-hermes-desktop)
-- **Device commands.** `hermes gadget devices`, `info`, `pair`, `update` and `forget` manage devices from the host. [Hermes integration](hermes-integration.md#hermes-surfaces-the-sdk-uses)
+- **Device commands.** `hermes gadget devices`, `info`, `pair`, `update`, `bot-chat` and `forget` manage devices from the host. [Hermes integration](hermes-integration.md#hermes-surfaces-the-sdk-uses)
 - **Speech language.** Set the language gadget speech is transcribed in, whichever profile answers. [Fix the language of gadget speech](hermes-integration.md#fix-the-language-of-gadget-speech)
 - **Faster replies.** Settings in Hermes that shorten the wait for an answer. [Making replies fast](hermes-integration.md#making-replies-fast)
 
@@ -130,6 +135,7 @@ The table shows what each board profile drives. In the battery column, "Voltage"
 | Waveshare ESP32-S3-LCD-1.54 | Touch SKUs | Yes | Yes | Voltage | Light sleep | Partial report |
 | Waveshare ESP32-S3-Touch-LCD-1.83 | Yes | Yes | Yes | Gauge | | Not run on a board |
 | Waveshare ESP32-S3-Touch-LCD-1.46 | Yes | Yes | Yes | No | | Not run on a board |
+| Waveshare ESP32-S3-Touch-LCD-1.47 | Yes | No | No | No | | Picture, Wi-Fi, one card and swipe-down cancel checked; colour, a tap, a prompt and a silent timer not checked |
 | Waveshare ESP32-S3-Touch-AMOLED-1.32 | Yes | Yes | Yes | No | | Not run on a board |
 | Waveshare ESP32-S3-Touch-AMOLED-1.43C | Yes | Yes | Yes | Voltage | | Not run on a board |
 | Waveshare ESP32-S3-Touch-AMOLED-1.75 | Yes | Yes | Output, needs a speaker | Gauge | Face-down sleep, clock chip | Some features checked |
@@ -145,9 +151,11 @@ The table shows what each board profile drives. In the battery column, "Voltage"
 | Spotpear ESP32-S3-1.54 muma | Touch version | Yes | Yes | Voltage | Light sleep | Smoke test |
 | Espressif ESP32-S3-BOX | Yes | Yes | Yes | No | | Not run on a board |
 | Espressif ESP32-S3-Korvo-2 | Yes | Yes | Yes | Voltage | | Not run on a board |
+| LCDWIKI ES3C28P | Yes | Yes | Output, needs a speaker | Voltage | | Partial report |
 | Espressif ESP32-S3-BOX-3 | Yes | Yes | Yes | No | | No report yet |
 | M5Stack CoreS3 | Yes | Yes | Yes | Gauge | | No report yet |
 | M5Stack StickS3 | No | Yes | Yes | Voltage | Face-down sleep | Smoke test |
+| M5Stack StopWatch | Yes | Yes | Yes | Voltage (measured curves) | Face-down sleep, clock chip | Partial report |
 | LilyGO T-Display-S3 | No | No | No | Voltage | Text through the USB console | Smoke test |
 | Elecrow CrowPanel 2.1-inch HMI | Yes | No | No | No | Knob; text through the USB console | Smoke test |
 | Elecrow CrowPanel 5.0-inch HMI | Yes | No | No | No | Text through the USB console | Boot check |

@@ -49,6 +49,12 @@ namespace hg::i18n {
   X(DisplayCheckIntro,      "Start to show red, green, blue, white and black bands.") \
   X(InputCheck,             "Input check") \
   X(InputCheckIntro,        "Start to check the controls. Cancel leaves this check.") \
+  X(Camera,                 "Camera") \
+  X(CameraIntro,            "Open the camera. Tap for a photo after a three-second countdown; tap again to retake. Swipe down to leave.") \
+  X(CameraTake,             "Tap to take a photo") \
+  X(CameraHoldStill,        "Hold still") \
+  X(CameraRetake,           "Tap to retake") \
+  X(CameraFailed,           "The camera didn't take a photo") \
   X(DeviceInfo,             "Device information") \
   X(DeviceInfoBody,         "{0}\nFirmware {1}\n{2}\nMicrophone: {3}\nSpeaker: {4}") \
   X(Available,              "available") \
@@ -95,6 +101,9 @@ namespace hg::i18n {
   X(ChargedSoundOff,        "Off\nA full battery is silent.") \
   X(BatteryFull,            "Battery full") \
   X(YouCanUnplug,           "You can unplug") \
+  X(WifiDeepSleep,          "Deep Wi-Fi sleep") \
+  X(WifiDeepSleepOn,        "On\nOn battery with the screen dark, Wi-Fi sleeps deeper.") \
+  X(WifiDeepSleepOff,       "Off\nFor a router that drops the gadget while it sleeps.") \
   X(TouchWake,              "Touch wakes screen") \
   X(TouchWakeOn,            "On\nA touch lights the dark screen.") \
   X(TouchWakeOff,           "Off\nOnly a button lights the dark screen.") \
@@ -104,6 +113,12 @@ namespace hg::i18n {
   X(WakeTalk,               "Talk from dark screen") \
   X(WakeTalkOn,             "On\n{0} lights the dark screen and records.") \
   X(WakeTalkOff,            "Off\n{0} only lights the dark screen.") \
+  X(Animation,             "Animation") \
+  X(AnimationOn,            "On\nThe ring and the Updating screen move.") \
+  X(AnimationOff,           "Off\nThe ring and the Updating screen stand still.") \
+  X(SdLog,                  "SD card logging") \
+  X(SdLogOn,                "On\nThe log is copied to hermes.log on the microSD card.") \
+  X(SdLogOff,               "Off\nNothing is written to the microSD card.") \
   X(FaceDownSleep,          "Face-down sleep") \
   X(FaceDownSleepOn,        "On\nFace down, the screen sleeps and Hermes stays quiet.") \
   X(FaceDownSleepOff,       "Off\nSelect to sleep when the gadget lies face down.") \
@@ -220,6 +235,11 @@ namespace hg::i18n {
   X(HermesWaiting,          "Hermes is waiting for you") \
   X(AnsweredYes,            "Answered: yes") \
   X(AnsweredNo,             "Answered: no") \
+  X(AnsweredChoice,         "Answered: {0}") \
+  X(ChoiceTapHint,          "Tap an answer") \
+  X(ChoicePickHint,         "{0}: choose") \
+  X(ChoiceStepHint,         "{0}: next, {1}: choose") \
+  X(ChoiceCancel,           "Cancel") \
   X(Image,                  "Image") \
   /* Ready screen */ \
   X(Ready,                  "Ready") \

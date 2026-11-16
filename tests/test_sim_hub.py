@@ -205,6 +205,24 @@ def test_agent_invokes_device_actions(loop_thread, devserver, make_sim):
     assert "color is required" in str(bad.exception())
 
 
+def test_the_hub_takes_a_diagnostics_report_without_a_cable(loop_thread, devserver, make_sim):
+    hub, _brain, url = devserver()
+    sim = make_sim(url)
+    assert sim.wait_screen("ready", timeout=10)
+    session = next(iter(hub.sessions.values()))
+
+    import asyncio
+
+    got = asyncio.run_coroutine_threadsafe(session.request_diag(), loop_thread.loop)
+    assert sim.wait_for(got.done, timeout=5)
+    report = got.result()["report"]
+    # The same report the console's `diag` prints.
+    assert report["device_id"] == session.device_id
+    assert report["app"]["phase"] == "online"
+    assert isinstance(report["connection"]["closes_total"], int)
+    assert isinstance(got.result()["log"], str)
+
+
 def test_cards_and_images_take_over_the_screen(loop_thread, devserver, make_sim):
     hub, _brain, url = devserver()
     sim = make_sim(url)
@@ -1326,6 +1344,49 @@ def test_timer_runs_and_rings_through_the_hub(loop_thread, devserver, make_sim):
     sim.tap("talk")  # a press stops the alarm; it records nothing
     assert sim.wait_screen("ready", timeout=3)
     assert not any(m.get("type") == "audio.start" for m in sim.sent[-5:])
+
+
+def test_agent_sets_the_face_expression_through_the_hub(loop_thread, devserver, make_sim, tmp_path):
+    import asyncio
+
+    hub, _brain, url = devserver()
+    sim = make_sim(url)
+    assert sim.wait_screen("ready", timeout=10)
+    session = next(iter(hub.sessions.values()))
+    assert "face.set" in session.action_names()
+    sim.run_for(0.3)
+    neutral = sim.screenshot(tmp_path / "neutral.png").read_bytes()
+
+    def call(args):
+        # The device answers on its own thread, so step the simulator while the hub waits.
+        future = asyncio.run_coroutine_threadsafe(session.invoke_action("face.set", args), loop_thread.loop)
+        assert sim.wait_for(future.done, timeout=5)
+        return future
+
+    shots = {"neutral": neutral}
+    for name in ("happy", "confused", "alert", "sleepy"):
+        assert call({"expression": name}).result() == {"expression": name}
+        assert sim.status()["expression"] == name
+        sim.run_for(0.3)
+        shots[name] = sim.screenshot(tmp_path / f"{name}.png").read_bytes()
+    assert len(set(shots.values())) == 5  # each one draws a face of its own
+
+    assert "expression must be one of" in str(call({"expression": "furious"}).exception())
+    assert sim.status()["expression"] == "sleepy"  # a refused call leaves the face alone
+
+    # With seconds it goes back to neutral by itself.
+    assert call({"expression": "alert", "seconds": 1}).result() == {"expression": "alert", "seconds": 1}
+    assert sim.wait_for(lambda: "expression" not in sim.status(), timeout=3)
+
+    assert "seconds must be between 1 and 3600" in str(call({"expression": "happy", "seconds": 2.9}).exception())
+
+    # Without them it lasts until the user's next turn.
+    assert call({"expression": "happy"}).result() == {"expression": "happy"}
+    sim.run_for(1.5)
+    assert sim.status()["expression"] == "happy"
+    sim.type_text("hello")
+    assert sim.wait_screen("thinking", "responding", timeout=5)
+    assert "expression" not in sim.status()
 
 
 class _Thumbs(_TwoProfiles):

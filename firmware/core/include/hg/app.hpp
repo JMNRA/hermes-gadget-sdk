@@ -44,6 +44,9 @@ struct DeviceProfile {
   std::string default_access_token;
   uint32_t mic_rate = 16000;
   float vad_min_rms = 500.0f;  // tap mode: the quietest block that counts as speech (a quiet mic wants less)
+  // A held recording in which the microphone heard no speech is dropped, not sent: for boards whose
+  // vad_min_rms was measured on the board. Off, hold mode sends whatever was recorded.
+  bool drop_silent_recordings = false;
   uint32_t speaker_rate = 16000;
   bool has_cancel_button = true;
   bool has_scroll_buttons = false;
@@ -80,11 +83,14 @@ struct DeviceProfile {
   // `ts_key` (the auth key, a secret) settings. With `tailnet on` the device waits for the port's
   // on_tunnel(true) before it connects to Hermes.
   bool tailnet = false;
+  // The board has a microSD slot the port logs to (the `sd_log` setting).
+  // Boards without one hide the setting; the port's SdLogger stays off.
+  bool sd_log = false;
   // Faces in colour too: begin() takes px*px*2 bytes for one (72 KB at 192 px) from this, and free()
   // releases them. Without it, or when it returns null, the board offers one-colour faces.
   void* (*colour_face_alloc)(size_t) = nullptr;
   // Keeps each recording whole while it uploads: begin() takes RecordingBuffer::bytes_for(the
-  // utterance limit, mic_rate) bytes (1 MB for 30 s at 16 kHz, 1.5 MB at 24 kHz) from this, released with
+  // utterance limit, mic_rate) bytes (2 MB for 60 s at 16 kHz, 3 MB at 24 kHz) from this, released with
   // std::free. A connection lost mid-recording then loses nothing: recording goes on, and the
   // whole of it is sent again once the device is back online. Without it, or when it returns
   // null, audio streams straight to the link and a lost connection ends the recording.
@@ -176,6 +182,20 @@ class App {
   void settings_drag(int x, int y);
   void settings_tap(int x, int y);
   void settings_lift();
+  // The camera (the CoreS3's GC0308, boards whose port sets hal.camera): the settings
+  // menu's Camera item opens it. With the live view up, a tap starts a three-second
+  // countdown and captures; the photo stays on screen until the next tap (retake) or
+  // a swipe down (CANCEL, which leaves); 60 s with no input leaves too, and the
+  // screen never dims while the camera is out. Hold to talk is off here: a tap is
+  // the only trigger.
+  bool open_camera();
+  void close_camera();
+  bool camera_open() const { return camera_open_; }
+  // Touch: a tap anywhere on the camera screen is the trigger. True only while the
+  // camera screen is up and a tap can act (TouchGestures routes it here instead of
+  // to TALK).
+  bool camera_tap_live() const { return camera_open_; }
+  void camera_tap();
   // Hermes profiles: which one answers this device. Switching asks the server; the
   // device keeps a profile only once Hermes confirms it, and asks again only after an answer.
   bool next_agent_profile();
@@ -198,6 +218,12 @@ class App {
   static constexpr uint32_t kProfileReplyMs = 15000;
   int profile_row_hit(int x, int y) const;
   void profile_tap(int x, int y);
+  // A choice from Hermes on a touchscreen (TouchGestures): whether its list takes the touch, a tap
+  // on an answer, and a swipe up, which shows the next page of a list longer than the screen.
+  bool choice_touch_live() const;
+  // held_ms: how long the finger was down. The press guard counts from when it went down.
+  void choice_tap(int x, int y, uint32_t held_ms = 0);
+  bool choice_page_step();
   // The roster a welcome may bring: the device keeps the first kMaxProfiles entries.
   static constexpr size_t kMaxProfiles = 32;
   // Profile thumbnails' side: the grid's largest icon, held to this range (docs/protocol.md#profile-thumbnails).
@@ -236,7 +262,7 @@ class App {
   // Dozing (System::set_dozing): the port's loop may wait this long for events.
   static constexpr uint32_t kDozeWaitMs = 100;
   // The longest recording; the recording buffer holds this much (RecordingBuffer::bytes_for).
-  static constexpr uint32_t kMaxUtteranceMs = 30000;
+  static constexpr uint32_t kMaxUtteranceMs = 60000;
   // A recording that ended with the connection lost waits this long for it to come back
   // (about three connection attempts), then is dropped.
   static constexpr uint32_t kRecordingWaitMs = 45000;
@@ -247,6 +273,18 @@ class App {
   // A turn is under way: listening, waiting for a reply, or responding, which lasts until the
   // reply has finished playing. The port keeps Wi-Fi at full power until it ends.
   bool in_turn() const { return mode_ != Mode::Idle; }
+  // The last time Hermes sent a frame other than its heartbeat ping (0: none yet). The
+  // port lets Wi-Fi sleep deeper only after a quiet while (wifi_power.hpp).
+  uint32_t traffic_at() const { return traffic_at_; }
+  // The `wifi_deep_sleep` setting (on by default): off, Wi-Fi never goes past minimum
+  // modem sleep, for an access point that drops or delays clients in deeper sleep.
+  bool wifi_deep_sleep() const { return wifi_deep_sleep_; }
+  // The `animation` setting (on by default): off, the edge ring's comet and
+  // the Updating screen's spinner stand still.
+  bool animation() const { return animation_; }
+  // The `sd_log` setting (off by default): the device log is mirrored to the
+  // microSD card (/sdcard/hermes.log) when one is present.
+  bool sd_log() const { return sd_log_; }
   // These run on the app task. Start returns private, on-screen instructions.
   std::function<std::string()> on_wifi_setup;
   std::function<void()> on_wifi_setup_close;
@@ -287,6 +325,11 @@ class App {
   std::function<void(json::Value& report)> on_diag;
   // Recent log lines for `diag log`, oldest first. Ports that keep none leave it unset.
   std::function<std::string()> recent_log;
+  // `log <tag | *> <level>`: how much a log tag says until restart, `*` for every tag.
+  // The level is one of kLogLevels. Returns false when the port refused it. Ports
+  // without log levels leave it unset.
+  std::function<bool(const std::string& tag, const std::string& level)> on_log_level;
+  static constexpr const char* kLogLevels[] = {"none", "error", "warn", "info", "debug"};
 
   // --- introspection --------------------------------------------------------
   Screen screen() const { return model_.screen; }
@@ -330,16 +373,23 @@ class App {
   void h_image_end(const json::Value& m);
   void h_action(const json::Value& m);
   void h_ping(const json::Value& m);
+  void h_diag(const json::Value& m);
   void h_notice(const json::Value& m);
   void h_error(const json::Value& m);
   void h_prompt(const json::Value& m);
   void h_prompt_close(const json::Value& m);
+  void h_choice(const json::Value& m);
+  void h_choice_close(const json::Value& m);
   void h_dashboard(const json::Value& m);
   void h_ota_offer(const json::Value& m);
   void h_ota_begin(const json::Value& m);
   void h_ota_end(const json::Value& m);
   void h_ota_abort(const json::Value& m);
   void h_profile(const json::Value& m);
+  void h_profiles(const json::Value& m);
+  // The profiles offered, from a welcome or a later `profiles` message: the list, and the thumbnails
+  // of profiles no longer in it dropped.
+  void set_agent_roster(const json::Value& profiles);
   void h_face(const json::Value& m);
   void h_face_start(const json::Value& m);
   void h_face_end(const json::Value& m);
@@ -391,6 +441,8 @@ class App {
   bool clock_blocked() const;
   void clock_tick();
   json::Value status_value() const;
+  // The diagnostics report: the console's `diag` prints it, and the hub's `diag` request gets it.
+  json::Value diag_value();
   std::string diag_report();
   // frame timing (app_perf.cpp)
   std::string perf_command(std::string_view args);
@@ -408,6 +460,7 @@ class App {
   bool can_talk() const;
   void start_listening(bool hands_free);
   void finish_listening();
+  void end_held_recording();
   void cancel_listening(std::string_view why);
   // The recording buffer (profile_.recording_alloc): see rec_ below.
   bool send_audio_start();
@@ -439,6 +492,20 @@ class App {
   bool prompt_armed(uint32_t pressed_at) const;
   void answer_prompt(bool yes);
   void clear_prompt();
+  // A choice is the question on screen (a yes/no question asked meanwhile goes over it).
+  bool choice_showing() const { return prompt_id_.empty() && !choice_id_.empty() && prompt_showing(); }
+  // How a choice is answered: a highlighted row that TALK picks (boards with Up/Down, and boards
+  // with neither those nor touch, where CANCEL steps to the next row and a last row cancels).
+  bool choice_keys() const { return profile_.has_scroll_buttons || !profile_.touch_screen; }
+  bool choice_steps() const { return !profile_.has_scroll_buttons && !profile_.touch_screen; }
+  bool can_choose() const {
+    return ui_ && (profile_.has_scroll_buttons || profile_.touch_screen || profile_.has_cancel_button);
+  }
+  int choice_row_count() const { return static_cast<int>(choice_options_.size()) + (choice_steps() ? 1 : 0); }
+  bool choice_armed(uint32_t pressed_at) const;
+  void choice_move(int delta, bool wrap);
+  void answer_choice(int index);  // an option's index; anything else cancels
+  void clear_choice();
   void flush_sensors();
   // Tells Hermes when the screen goes dark or lights up (docs/protocol.md#screen-sleep).
   void flush_display_state();
@@ -465,6 +532,16 @@ class App {
   json::Value timer_value() const;      // the `timer` object of status and timer.status
   void start_alarm();
   void dismiss_alarm();
+  // the face's expression (app_face.cpp)
+  void add_face_actions();
+  // False with `error` for an unknown name, or for `timed` seconds outside 1..3600.
+  bool set_expression(std::string_view name, int64_t seconds, bool timed, std::string& error);
+  // The user's next turn ends it: called where a recording starts, a typed message is sent and a
+  // new session is asked for. A turn Hermes starts by itself does not.
+  void end_expression();
+  mascot::Expression expression_now();  // ends it first when its seconds are over
+  bool expression_still() const;        // its mark has moved for long enough
+  std::string face_command(std::string_view args);
   bool alarm_flash() const;
   void beep_pattern();
 
@@ -530,7 +607,9 @@ class App {
   bool lang_auto_ = false;
   std::optional<i18n::Lang> hermes_lang_;  // from the last `welcome` that named one this firmware has
   enum class Menu : uint8_t { Closed, Volume, Brightness, TalkMode, TouchTalk, Profile, ProfileGrid, Microphone, Speaker, Display, Inputs,
-                              Info, Power, BatteryAlert, BatteryAlertSound, ChargingNotice, ChargingSound, ChargedNotice, ChargedSound, IdleTimer, TouchWake, FaceDownSleep, Clock, PowerOff, WifiSetup, Phone, Language, DoubleHome, WakeTalk, Back };
+                              Camera, Info, Power, BatteryAlert, BatteryAlertSound, ChargingNotice, ChargingSound, ChargedNotice, ChargedSound,
+                              WifiDeepSleep, IdleTimer, TouchWake, FaceDownSleep, Clock, PowerOff, WifiSetup, Phone, Language, DoubleHome,
+                              WakeTalk, Animation, SdLog, Back };
   enum class HardwareCheck : uint8_t { None, Microphone, Speaker, Display, Inputs };
   Menu menu_ = Menu::Closed;
   // The settings list's scroll in pixels, and where it eases to. It follows the
@@ -549,6 +628,21 @@ class App {
   // An item's name and text, in `m`'s detail and body (the model's own for the selected item), and its row.
   void settings_item(Menu item, UiModel& m) const;
   SettingRow settings_row(Menu item, const std::string& label, const std::string& body) const;
+  // Camera mode (app_camera.cpp): the state, the countdown, the photo, and the
+  // draw step that rides the app's render tick (preview at the frame rate, the
+  // countdown number over it, the photo once).
+  void camera_draw();
+  void camera_model();
+  void camera_tick();
+  void camera_capture();  // the countdown fired: one still; failure goes back to the live view
+  enum class CameraState : uint8_t { Preview, Countdown, Shot };
+  bool camera_open_ = false;
+  CameraState camera_state_ = CameraState::Preview;
+  Countdown camera_countdown_;
+  Camera::Still camera_shot_;  // the photo on screen; empty while there is none
+  bool camera_shot_drawn_ = false;
+  uint32_t camera_touch_at_ = 0, camera_frame_at_ = 0;
+  bool camera_frame_due_ = false;  // draw the next preview frame now, whatever camera_frame_at_ says
   HardwareCheck hardware_check_ = HardwareCheck::None;
   std::string check_result_;
   std::string wifi_setup_text_;
@@ -635,6 +729,9 @@ class App {
   bool face_down_sleep_ = false;      // the `face_down_sleep` setting
   bool touch_wake_ = true;            // the `touch_wake` setting
   bool double_home_ = true;           // the `double_home` setting
+  bool wifi_deep_sleep_ = true;       // the `wifi_deep_sleep` setting
+  bool animation_ = true;              // the `animation` setting
+  bool sd_log_ = false;                // the `sd_log` setting
   bool wake_talk_ = false;            // the `wake_talk` setting
   bool touch_talk_ = true;            // the `touch_talk` setting
   bool reply_while_face_down_ = false;  // a reply arrived while dark; show it on the turn-over
@@ -651,6 +748,7 @@ class App {
   uint32_t phase_since_ = 0;
   uint32_t online_since_ = 0;
   uint32_t last_rx_ = 0;
+  uint32_t traffic_at_ = 0;
   uint32_t heartbeat_ms_ = 20000;
   int backoff_ = 0;
   int attempts_ = 0;
@@ -748,6 +846,12 @@ class App {
   uint32_t overlay_until_ = 0;  // 0 = until dismissed
   std::string card_title_, card_body_;
   int card_scroll_ = 0;
+  // a structured card (docs/protocol.md#display): its id, list, progress (-1: none) and code
+  std::string card_id_;
+  std::vector<std::string> card_items_;
+  int8_t card_progress_ = -1;
+  qr::Code card_qr_;
+  bool card_rich() const { return !card_items_.empty() || card_progress_ >= 0 || card_qr_.ok(); }
   int image_stream_ = -1;
   int image_w_ = 0, image_h_ = 0, image_x_ = 0, image_y_ = 0;
   size_t image_px_ = 0;
@@ -764,6 +868,14 @@ class App {
   std::string prompt_id_, prompt_title_, prompt_text_;
   uint32_t prompt_since_ = 0;
   uint32_t prompt_until_ = 0;  // 0 = until answered or withdrawn
+
+  // a choice from the agent: a title and a few answers (docs/protocol.md#questions)
+  std::string choice_id_, choice_title_;
+  std::vector<std::string> choice_options_;
+  int choice_sel_ = 0, choice_first_ = 0;  // the highlighted row, and the first one on screen
+  uint32_t choice_since_ = 0;  // when it last came to the front: presses just after answer nothing
+  bool choice_front_ = false;  // the Choice screen is what the model shows
+  uint32_t choice_until_ = 0;  // 0 = until answered or withdrawn
 
   // transient messages
   std::string notice_;
@@ -803,6 +915,12 @@ class App {
   uint32_t next_beep_at_ = 0;
   std::string timer_label_;
   std::vector<int16_t> beep_pcm_;  // built on the first beep
+
+  // the face's expression (app_face.cpp): RAM only
+  mascot::Expression expression_ = mascot::Expression::Neutral;
+  bool expression_timed_ = false;       // it ends at expression_until_
+  uint32_t expression_until_ = 0;
+  uint32_t expression_since_ = 0;       // when it was set: the mark moves for a minute from then
 
   // frame timing: the running statistics while `perf` is on, and the bench
   std::unique_ptr<FrameStats> frame_stats_;

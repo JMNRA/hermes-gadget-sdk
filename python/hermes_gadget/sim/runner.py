@@ -45,12 +45,16 @@ class Board:
 BOARDS = {
     "sim-320x240": Board("sim-320x240", 320, 240),
     "sim-240x135": Board("sim-240x135", 240, 135),
+    # Geometry/audio only; physical keyboard/editor have separate host C++ tests.
+    "cardputer-adv": Board("cardputer-adv", 240, 135),
     "sim-480x320": Board("sim-480x320", 480, 320),
     "sim-240x240-nospeaker": Board("sim-240x240-nospeaker", 240, 240, speaker=False),
     # A 1.54" 240x240 SPI LCD with codecs (e.g. Waveshare ESP32-S3-LCD-1.54): no scroll buttons.
     "sim-240x240": Board("sim-240x240", 240, 240, scroll_buttons=False),
     # A 1.83" 240x284 SPI LCD with touch (e.g. Waveshare ESP32-S3-Touch-LCD-1.83).
     "sim-240x284": Board("sim-240x284", 240, 284, scroll_buttons=False, touch=True),
+    # A 2.8" 240x320 SPI LCD in portrait with touch (e.g. LCDWIKI ES3C28P).
+    "sim-240x320": Board("sim-240x320", 240, 320, scroll_buttons=False, touch=True),
     # A 1.28" round 240x240 LCD with touch (e.g. Spotpear ESP32-S3-1.28-BOX): no scroll buttons.
     "sim-240x240-round": Board("sim-240x240-round", 240, 240, scroll_buttons=False, round=True, touch=True),
     # Waveshare 1.85C V2: round LCD and touch, no scroll buttons.
@@ -75,6 +79,9 @@ BOARDS = {
     # A 1.9" 320x170 board with no audio hardware (e.g. LilyGO T-Display-S3).
     "sim-320x170-nospeaker": Board("sim-320x170-nospeaker", 320, 170, mic=False, speaker=False,
                                    scroll_buttons=False),
+    # A 1.47" 320x172 landscape touch board with no audio hardware (e.g. Waveshare ESP32-S3-Touch-LCD-1.47).
+    "sim-320x172-nospeaker": Board("sim-320x172-nospeaker", 320, 172, mic=False, speaker=False,
+                                   scroll_buttons=False, touch=True),
     # A 5.0" 800x480 RGB touch board with no audio hardware (e.g. Elecrow CrowPanel 5.0).
     "sim-800x480-nospeaker": Board("sim-800x480-nospeaker", 800, 480, mic=False, speaker=False,
                                    scroll_buttons=False, touch=True),

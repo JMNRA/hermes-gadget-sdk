@@ -52,6 +52,7 @@ A first session, start to finish:
 | Hold **Esc** / CANCEL for 2 s | Start a new Hermes session (`/new`); a countdown shows in the hint bar |
 | Hold **Space + Esc** for 1 s | Open or close the device's settings and local hardware checks |
 | **Space** / **Esc** on a question | Answer yes / no |
+| A [choice](using-gadget.md#pick-an-answer) | Click an answer on a touch board; otherwise **Up / Down** then **Space**, and **Esc** cancels. On a board with neither, **Esc** moves to the next answer. `choose 2` or `choose cancel` in the device console answers it too |
 | **Up / Down** | Scroll a long reply (long replies also page by themselves) |
 | **Ctrl+S** | Save a PNG screenshot into the state directory |
 | Text box | Send a typed message, as from a keyboard device |
@@ -62,6 +63,8 @@ A first session, start to finish:
 | **Developer tools**, sensors | Battery and temperature sliders, reported to Hermes as telemetry |
 | **Developer tools**, serial console | The same commands as the board's UART console (`help`, `status`, `set server ...`) |
 | **Developer tools**, Power (simulated) | Supply a complete power-driver reading, independently of the generic telemetry sliders |
+
+The face's [expressions](architecture.md#the-mascot) are in the core, so the simulator draws them. In the serial console, `face happy` sets one, `face sleepy 10` sets one for 10 seconds, `face neutral` clears it and `face` reports it; the `face.set` action does the same from Hermes.
 
 The simulated device registers two demo actions the agent can use: `led.set` (a virtual LED in the window) and `buzzer.beep`.
 
@@ -82,6 +85,8 @@ The **Telemetry battery %** slider remains an independent generic sensor, not th
 
 Rebuilding the window for a board change or starting a new simulator resets the power fixture to unavailable. Firmware settings persist in `nvs.json`; fixtures do not. Rebuild the simulator library after this ABI 8 update, which adds the host's wall-clock time for the resting clock; Linux native-core clients still default to no power device.
 
+To hear a sound file on the simulated speaker, type `play <path>` in the dev server's console and `stop` to end it (WAV, or anything `ffmpeg` decodes). With Hermes, ask the agent, which uses [`gadget_play`](hermes-integration.md#playing-audio).
+
 Like a board, the simulated device takes firmware updates (`hermes gadget update`, or `update <path>` in the dev server). It checks the image the way the core does and keeps only ESP32 app images. Then it "restarts": it drops the connection and connects again, still running the simulator.
 
 ## Boards
@@ -93,6 +98,7 @@ Like a board, the simulated device takes firmware updates (`hermes gadget update
 | `sim-480x320` | 480×320 | Larger panel |
 | `sim-240x240` | 240×240 | The 1.54" LCD board: two buttons, no scroll buttons, so long replies page by themselves |
 | `sim-240x284` | 240×284 | The 1.83" Touch-LCD: hold the mouse on the screen to talk, click to answer yes, drag down to cancel. No scroll buttons |
+| `sim-240x320` | 240×320 | The 2.8" LCDWIKI ES3C28P in portrait: hold the mouse on the screen to talk, click to answer yes, drag down to cancel. No scroll buttons |
 | `sim-240x240-nospeaker` | 240×240 | No speaker, so replies stay text only |
 | `sim-240x240-round` | 240×240 round | The Spotpear 1.28-BOX touch board, the smallest round screen, with the same controls as `sim-466x466-round` |
 | `sim-360x360-round` | 360×360 round | The 1.85C V2 LCD touch board, with the same controls as `sim-466x466-round` |
@@ -101,6 +107,7 @@ Like a board, the simulated device takes firmware updates (`hermes gadget update
 | `sim-410x486` | 410×486 | The 2.06" AMOLED watch's display window: hold the mouse to talk, click to answer yes, drag down to cancel. No scroll buttons. Does not model the glass's rounded corners or microphone gain |
 | `sim-480x480` | 480×480 | The 2.16" square AMOLED touch board: hold the mouse to talk, click to answer yes, drag down to cancel. No scroll buttons |
 | `sim-480x480-round-nospeaker` | 480×480 round | A round touch board with no microphone or speaker, like the CrowPanel 2.1. Timers show their countdown and alarm, silently. No scroll buttons |
+| `sim-320x172-nospeaker` | 320×172 | The 1.47" Touch-LCD in landscape: hold the mouse on the screen to talk, click to answer yes, drag down to cancel. No microphone or speaker, so a timer alarm is silent. No scroll buttons |
 
 Add a profile to `BOARDS` in `python/hermes_gadget/sim/runner.py` to mirror new hardware.
 
@@ -141,6 +148,12 @@ screenshot /tmp/hg-battery-50.png
 power null
 sleep 5.2
 status
+```
+
+`console face <expression> [seconds]` sets the face's expression in a script, and `status` reports it as `expression` while one is set. `examples/scripts/faces.txt` shows each one and saves a screenshot of it:
+
+```bash
+hermes-gadget sim --headless --url ws://127.0.0.1:8765/gadget --script examples/scripts/faces.txt
 ```
 
 Power objects accept only `battery_present`, `battery_mv`, `battery_percent`, `charging`, and `external_power`. Missing fields or JSON `null` values are unknown; `{}` is an available reading with every field unknown. Booleans must be `true`/`false`, voltage an integer 0–65535, and percentage an integer 0–100; booleans are not numeric inputs. Invalid JSON, keys, types, or ranges stop a script with a line-numbered error and leave the applied fixture unchanged. Voltage-only `status.power` never gains a derived `battery_percent`, even when the header displays an estimate.
