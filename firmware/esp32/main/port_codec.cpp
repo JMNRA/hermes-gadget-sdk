@@ -175,7 +175,7 @@ bool CodecAudio::begin(const CodecAudioConfig& cfg, i2c_master_bus_handle_t bus)
   if (shared) in_ = out_;  // one handle, opened once
   else if (in_ && esp_codec_dev_open(in_, &fs) != ESP_CODEC_DEV_OK) in_ = nullptr;
   if (out_) {
-    esp_codec_dev_set_out_vol(out_, 70);
+    esp_codec_dev_set_out_vol(out_, cfg.volume);
     esp_codec_dev_set_out_mute(out_, true);  // unmuted while something plays
     // A board that asks for it: the ES8311's DAC ramps volume on mute/unmute (reg 0x37, ramp
     // rate in bits 4-7). Another speaker codec has some other register there.

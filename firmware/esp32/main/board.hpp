@@ -168,7 +168,7 @@ struct I2cBusConfig {
 
 // ES8311, ES8388 or AW88298 (speaker) and the microphone ADC sharing one duplex
 // I2S bus, controlled over the I2C bus. Es8388 is the speaker only. The
-// microphone stays an ES7210. No board selects Es8388 yet.
+// microphone stays an ES7210. The M5Stack Tab5 selects Es8388 + Es7210.
 enum class SpeakerCodec { Es8311, Aw88298, Es8388 };
 
 // The microphone ADC: an ES7210 for MEMS microphones, or the ES8311's own ADC
@@ -190,6 +190,10 @@ struct CodecAudioConfig {
   bool speaker_pa = false;    // CodecSpeaker drives `pa`, not esp_codec_dev (see CodecAudio::begin)
   bool dac_fade_ramp = false; // ES8311 speaker only: its DAC ramps volume on mute/unmute (reg 0x37)
   bool dac_mclk = true;       // false: the ES8311 derives its clock from BCLK
+  // The codec's initial output volume. The app applies the stored `volume`
+  // setting over it (default 70) as soon as it loads its settings, so this only
+  // covers what plays before that, such as a boot tone.
+  uint8_t volume = 70;
   uint8_t es7210_mics = 0x03;  // ES7210_SEL_MIC1 | ES7210_SEL_MIC2
 };
 

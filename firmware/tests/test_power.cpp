@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <utility>
 #include <vector>
 
 #include "axp2101.hpp"
@@ -1460,11 +1461,13 @@ TEST("Tab5 audio UI: each tone drives the confirmed HIGH enable and then verifie
   CHECK(failed.model().detail.find("do not assume") != std::string::npos);
 }
 
-TEST("Tab5: display-only profile does not inherit radio or GPIO45/46 LDO") {
+TEST("Tab5: profile keeps radio off and does not inherit GPIO45/46 LDO") {
   const auto b = hgp::tab5_config("m5stack-tab5");
   CHECK(!b.radio_enabled);
   CHECK(!b.lcd.dsi.vdd_io_ldo4);
-  CHECK(!b.codec.enabled && !b.mic.enabled && !b.speaker.enabled);
+  // The codec profile is carried now (the measured ES8388/ES7210 path); the
+  // chip's own I2S mic/speaker and the P4 codec-less speaker stay unused.
+  CHECK(b.codec.enabled && !b.mic.enabled && !b.speaker.enabled && !b.p4_speaker.enabled);
   CHECK(b.lcd.enabled && b.touch.enabled);
   CHECK_EQ(b.lcd.width, 720);
   CHECK_EQ(b.lcd.height, 1280);
@@ -1478,6 +1481,173 @@ TEST("Tab5: display-only profile does not inherit radio or GPIO45/46 LDO") {
   const hgp::BoardConfig legacy{};
   CHECK(legacy.radio_enabled);
   CHECK(legacy.lcd.dsi.vdd_io_ldo4);
+}
+
+TEST("Tab5: profile carries the measured ES8388 speaker and ES7210 microphone") {
+  const auto b = hgp::tab5_config("m5stack-tab5");
+  CHECK(b.codec.enabled);
+  CHECK(b.codec.speaker == hgp::SpeakerCodec::Es8388);
+  CHECK(b.codec.mic == hgp::MicCodec::Es7210);
+  // One duplex I2S_NUM_1 bus: MCLK 30, BCLK 27, WS 29, DOUT 26, DIN 28.
+  CHECK_EQ(b.codec.mclk, 30);
+  CHECK_EQ(b.codec.bclk, 27);
+  CHECK_EQ(b.codec.ws, 29);
+  CHECK_EQ(b.codec.dout, 26);
+  CHECK_EQ(b.codec.din, 28);
+  // The amplifier is the 0x43 expander's pin 1, never a GPIO, so no codec
+  // driver may drive one; the format stays the 24 kHz mono 16-bit one every
+  // SDK codec board runs.
+  CHECK_EQ(b.codec.pa, -1);
+  CHECK(!b.codec.speaker_pa);
+  CHECK(!b.codec.stereo32);
+  CHECK(!b.codec.rmnm_mics);
+  // MIC1|MIC2 and a gain inside what the working microphone probe opened.
+  CHECK_EQ(b.codec.es7210_mics, 0x03);
+  CHECK(b.codec.mic_gain_db > 0.0f && b.codec.mic_gain_db <= 24.0f);
+  // Measured here: -40 dBFS at volume 40 was silent, -12 dBFS at 75 was heard.
+  CHECK(b.codec.volume >= 50 && b.codec.volume <= 100);
+  CHECK(b.codec.amp_supply_v > 0.0f);
+  // The defaults other boards inherit are unchanged by this profile.
+  const hgp::CodecAudioConfig defaults{};
+  CHECK(!defaults.enabled);
+  CHECK(defaults.speaker == hgp::SpeakerCodec::Es8311);
+  CHECK_EQ(defaults.volume, 70);
+  CHECK_EQ(defaults.mic_gain_db, 24.0f);
+  CHECK_EQ(b.codec.mic_gain_db, defaults.mic_gain_db);
+}
+
+namespace {
+// The Tab5 amplifier's IO contract, on the numbered registers the reviewed
+// off sequence uses: read() and write() reach the 0x43 expander only, and
+// mute() silences the codec a failed request could not prove off.
+// `fail_at` fails the Nth operation of any kind; `apply_failed_write` models a
+// write that reached the chip although the bus reported an error;
+// `corrupt_readback` makes the readback of the last written register disagree
+// with the value written.
+struct Tab5AmplifierFake {
+  std::array<uint8_t, 256> regs{};
+  std::vector<std::pair<uint8_t, uint8_t>> writes;  // (register, value), in order
+  unsigned reads = 0, mutes = 0, operations = 0, fail_at = 0;
+  bool apply_failed_write = false, corrupt_readback = false;
+  uint8_t pending_readback = 0;  // register whose value was just written
+  bool read(uint8_t reg, uint8_t& value, uint32_t timeout) {
+    CHECK(timeout > 0);
+    ++reads;
+    value = regs[reg];
+    if (corrupt_readback && pending_readback == reg) value ^= 0x02;
+    pending_readback = 0;
+    return ++operations != fail_at;
+  }
+  bool write(uint8_t reg, uint8_t value, uint32_t timeout) {
+    CHECK(timeout > 0);
+    const bool ok = ++operations != fail_at;
+    if (ok || apply_failed_write) {
+      regs[reg] = value;
+      writes.emplace_back(reg, value);
+      pending_readback = reg;
+    }
+    return ok;
+  }
+  void mute() { ++mutes; }
+};
+}  // namespace
+
+TEST("Tab5: amplifier drives only expander 0x43 pin 1, HIGH enabled") {
+  for (unsigned seed : {0u, 0xffu, 0x55u, 0xaau}) {
+    Tab5AmplifierFake io;
+    io.regs.fill(static_cast<uint8_t>(seed));
+    hgp::Tab5Amplifier<Tab5AmplifierFake> amp(io);
+    CHECK(!amp.failed());
+    // The reviewed off state, in the order tab5_prepare_speaker_off uses:
+    // 0x05 the control bit clear, 0x07 an output, 0x03 driven (off level).
+    CHECK(amp.prepare_off());
+    CHECK_EQ(io.writes.size(), size_t{3});
+    CHECK_EQ(io.writes[0].first, uint8_t{0x05});
+    CHECK_EQ(io.writes[1].first, uint8_t{0x07});
+    CHECK_EQ(io.writes[2].first, uint8_t{0x03});
+    for (const auto& [reg, value] : io.writes) {
+      CHECK_EQ(value & ~0x02, seed & ~0x02u);  // every other expander pin preserved
+      CHECK(reg != 0x01);                      // never a chip reset
+    }
+    CHECK_EQ(io.regs[0x05] & 0x02, 0);
+    CHECK_EQ(io.regs[0x07] & 0x02, 0);
+    CHECK_EQ(io.regs[0x03] & 0x02, 0x02);
+    // Every write is followed by a readback, and nothing failed.
+    CHECK_EQ(io.operations, 9u);
+    CHECK_EQ(io.reads, 2 * io.writes.size());
+    CHECK(!amp.failed());
+    CHECK_EQ(io.mutes, 0u);
+    // Enable: the measured convention, HIGH = enabled, as one masked bit of
+    // 0x05 that is read back.
+    CHECK(amp.set(true));
+    CHECK_EQ(io.writes.size(), size_t{4});
+    CHECK_EQ(io.writes.back().first, uint8_t{0x05});
+    CHECK_EQ(io.writes.back().second, static_cast<uint8_t>((seed & ~0x02u) | 0x02));
+    CHECK_EQ(io.regs[0x05] & 0x02, 0x02);
+    CHECK_EQ(io.regs[0x07], static_cast<uint8_t>(seed & ~0x02u));
+    CHECK_EQ(io.regs[0x03] & ~0x02, seed & ~0x02u);
+    CHECK_EQ(io.operations, 12u);
+    CHECK_EQ(io.reads, 2 * io.writes.size());
+    CHECK(!amp.failed());
+    // Off again: one masked bit, read back, with the prepared direction and
+    // level left alone, so a tap can enable it again.
+    CHECK(amp.set(false));
+    CHECK_EQ(io.regs[0x05] & 0x02, 0);
+    CHECK_EQ(io.regs[0x07] & 0x02, 0);
+    CHECK_EQ(io.regs[0x03] & 0x02, 0x02);
+    CHECK(amp.set(true));
+    CHECK_EQ(io.regs[0x05] & 0x02, 0x02);
+    CHECK_EQ(io.reads, 2 * io.writes.size());
+    CHECK(!amp.failed());
+    CHECK_EQ(io.mutes, 0u);
+  }
+}
+
+TEST("Tab5: amplifier latches a failed write, mutes once and refuses to enable") {
+  for (bool applies : {false, true}) for (unsigned fail_at = 1; fail_at <= 12; ++fail_at) {
+    Tab5AmplifierFake io;
+    io.regs.fill(0xff);
+    io.operations = 0;
+    io.fail_at = fail_at;
+    io.apply_failed_write = applies;
+    hgp::Tab5Amplifier<Tab5AmplifierFake> amp(io);
+    const bool prepared = amp.prepare_off();
+    if (prepared) amp.set(true);
+    // Whichever operation failed, the state is unknown from then on.
+    CHECK(amp.failed());
+    CHECK_EQ(io.mutes, 1u);  // the codec is muted exactly once
+    // A failed request may have left the amplifier on: no later request may
+    // enable it, and none may claim it is off.
+    const unsigned operations = io.operations;
+    CHECK(!amp.set(true));
+    CHECK(!amp.set(false));
+    CHECK(!amp.prepare_off());
+    CHECK_EQ(io.operations, operations);  // no I2C after the latch
+    CHECK_EQ(io.mutes, 1u);
+  }
+  // A write the bus acknowledged but the chip did not keep is a failure too.
+  Tab5AmplifierFake io;
+  io.regs.fill(0xa7);
+  io.corrupt_readback = true;
+  hgp::Tab5Amplifier<Tab5AmplifierFake> amp(io);
+  CHECK(!amp.prepare_off());
+  CHECK(amp.failed());
+  CHECK_EQ(io.mutes, 1u);
+  const unsigned operations = io.operations;
+  CHECK(!amp.set(true));
+  CHECK_EQ(io.operations, operations);
+}
+
+TEST("Tab5: a failed amplifier request is reported as unknown, never as off") {
+  const std::string line = hgp::kTab5PaFailureLog;
+  CHECK(line.find("Tab5 amplifier") != std::string::npos);
+  CHECK(line.find("0x43") != std::string::npos);
+  CHECK(line.find("pin 1") != std::string::npos);
+  CHECK(line.find("muted") != std::string::npos);
+  CHECK(line.find("unknown") != std::string::npos);
+  CHECK(line.find("not off") != std::string::npos);
+  CHECK(line.find("reboot") != std::string::npos);
+  CHECK(line.find("amplifier is off") == std::string::npos);
 }
 
 TEST("Tab5: initialize speaker amplifier off without changing other expander pins") {

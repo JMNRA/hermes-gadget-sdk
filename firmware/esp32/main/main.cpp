@@ -425,6 +425,55 @@ hgp::StopWatchBoard g_stopwatch;
 hgp::PhoneLink g_phone;
 hgp::TailnetLink g_tailnet;
 #endif
+
+#if CONFIG_HG_BOARD_M5STACK_TAB5
+// The Tab5 amplifier adapter behind hgp::Tab5Amplifier: one 0x43 device handle
+// on the shared I2C bus, the expander the display/touch gates already used, with
+// no BSP expander, no cached register state and no chip reset. After boot this
+// is the only owner of pin 1, which carries the speaker amplifier enable.
+struct Tab5AmplifierIo {
+  i2c_master_dev_handle_t expander = nullptr;
+  bool read(uint8_t reg, uint8_t& value, uint32_t timeout) {
+    return i2c_master_transmit_receive(expander, &reg, 1, &value, 1, timeout) == ESP_OK;
+  }
+  bool write(uint8_t reg, uint8_t value, uint32_t timeout) {
+    const uint8_t data[] = {reg, value};
+    return i2c_master_transmit(expander, data, sizeof(data), timeout) == ESP_OK;
+  }
+  // A request that could not be verified must not leave an audible path: mute
+  // the codec. Best effort only, and never reported as an off state.
+  void mute() {
+    if (g_codec.out()) esp_codec_dev_set_out_mute(g_codec.out(), true);
+  }
+};
+Tab5AmplifierIo g_tab5_amp_io;
+hgp::Tab5Amplifier<Tab5AmplifierIo> g_tab5_amp(g_tab5_amp_io);
+
+// Runs before CodecSpeaker::begin(): adds the 0x43 device handle, drives pin 1
+// to the verified off state and hands the amplifier to the speaker's board_pa
+// hook, which cannot report an error (Tab5Amplifier latches one instead and then
+// refuses every later enable).
+bool tab5_begin_amplifier(i2c_master_bus_handle_t bus) {
+  if (!bus) return false;
+  i2c_device_config_t device{};
+  device.device_address = hgp::kTab5PaExpanderAddr;
+  device.scl_speed_hz = hgp::board_config().i2c.hz;
+  if (i2c_master_bus_add_device(bus, &device, &g_tab5_amp_io.expander) != ESP_OK) {
+    ESP_LOGE(TAG, "Tab5 amplifier: the 0x%02x expander handle failed; the speaker stays unregistered",
+             unsigned(hgp::kTab5PaExpanderAddr));
+    return false;
+  }
+  g_codec_speaker.board_pa = [](bool on) {
+    if (!g_tab5_amp.set(on)) ESP_LOGE(TAG, "%s", hgp::kTab5PaFailureLog);
+  };
+  if (!g_tab5_amp.prepare_off()) {
+    ESP_LOGE(TAG, "%s", hgp::kTab5PaFailureLog);
+    return false;
+  }
+  return true;
+}
+#endif
+
 hgp::Buttons g_buttons;
 hgp::Wifi g_wifi;
 hgp::SdLogger g_sdlog;
@@ -874,10 +923,22 @@ extern "C" void app_main(void) {
   if (!audio_power) ESP_LOGE(TAG, "audio supply unavailable");
   if (board.sticks3) g_codec_speaker.board_pa = [](bool on) { g_sticks3.set_amplifier(on); };
   if (board.stopwatch) g_codec_speaker.board_pa = [](bool on) { g_stopwatch.set_amplifier(on); };
+#if CONFIG_HG_BOARD_M5STACK_TAB5
+  // Tab5's amplifier enable is the 0x43 expander's pin 1, not a GPIO. A state
+  // that cannot be verified leaves the speaker unregistered instead of claiming
+  // an audible path; the microphones are unaffected.
+  const bool speaker_pa_ready = peripherals_ready && tab5_begin_amplifier(i2c_bus);
+  if (!speaker_pa_ready)
+    ESP_LOGE(TAG, "Tab5 speaker unregistered: the amplifier state could not be verified");
+#else
+  constexpr bool speaker_pa_ready = true;
+#endif
   if (board.codec.enabled && audio_power && g_codec.begin(board.codec, i2c_bus)) {
     if (g_codec_mic.begin(g_codec.in(), board.codec.rmnm_mics, g_codec.mic_link())) hal.mic = &g_codec_mic;
     g_codec_speaker.es8311_fade_ramp = board.codec.dac_fade_ramp && board.codec.speaker == hgp::SpeakerCodec::Es8311;
-    if (g_codec_speaker.begin(g_codec.out(), board.codec.stereo32, board.codec.speaker_pa ? board.codec.pa : -1)) hal.speaker = &g_codec_speaker;
+    if (speaker_pa_ready &&
+        g_codec_speaker.begin(g_codec.out(), board.codec.stereo32, board.codec.speaker_pa ? board.codec.pa : -1))
+      hal.speaker = &g_codec_speaker;
     // Light-sleep boards power the DAC down while dozing, if the mics don't share it.
     if (board.light_sleep && g_codec.mic_link().switchable) g_codec_speaker.allow_power_down(g_codec.mic_link().format);
   }
