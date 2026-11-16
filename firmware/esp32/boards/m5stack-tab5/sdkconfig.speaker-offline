@@ -1,0 +1,15 @@
+# Opt-in overlay: append AFTER sdkconfig.defaults and
+# boards/m5stack-tab5/sdkconfig.defaults in SDKCONFIG_DEFAULTS.
+# Use a fresh SDKCONFIG/build directory; defaults do not override cached values.
+# Speaker-only probe, not production firmware: the ES8388 as a DAC on a TX-only
+# I2S channel, the amplifier enable on expander 0x43 pin 1 with readback, and
+# one 1 kHz / 250 ms tone at about -40 dBFS after an explicit 's' over USB
+# Serial/JTAG. No ADC or ES7210, no app, NVS, identity, network, OTA or display.
+# The final line states SafeOff or Unknown. No hardware proof of sound, gain or
+# amplifier polarity.
+CONFIG_HG_BOARD_M5STACK_TAB5=y
+# CONFIG_HG_TAB5_STARTUP_NORMAL is not set
+# CONFIG_HG_TAB5_DIAGNOSTIC is not set
+# CONFIG_HG_TAB5_APP_OFFLINE is not set
+# CONFIG_HG_TAB5_MIC_OFFLINE is not set
+CONFIG_HG_TAB5_SPEAKER_OFFLINE=y

@@ -3,12 +3,49 @@
 #include <atomic>
 #include <string>
 #include <ctime>
+#include <cstdlib>
+
+#if CONFIG_HG_BOARD_M5STACK_TAB5
+#include "bootloader_random.h"
+#include "mbedtls/private/ctr_drbg.h"
+#include "tab5_entropy.hpp"
+#endif
 
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_timer.h"
 
 namespace hgp {
+
+#if CONFIG_HG_BOARD_M5STACK_TAB5
+namespace {
+mbedtls_ctr_drbg_context tab5_drbg;
+bool tab5_rng_ready = false;
+bool tab5_entropy_open = false;
+
+int tab5_entropy_callback(void*, unsigned char* out, size_t len) {
+  // A later automatic reseed must fail rather than reopen the ADC while in use.
+  if (!tab5_entropy_open) return MBEDTLS_ERR_CTR_DRBG_ENTROPY_SOURCE_FAILED;
+  esp_fill_random(out, len);
+  return 0;
+}
+}
+
+void tab5_rng_init() {
+  if (tab5_rng_ready) abort();
+  mbedtls_ctr_drbg_init(&tab5_drbg);
+  const bool seeded = tab5_seed_entropy(
+      [] { bootloader_random_enable(); tab5_entropy_open = true; },
+      [] { return mbedtls_ctr_drbg_seed(&tab5_drbg, tab5_entropy_callback, nullptr, nullptr, 0) == 0; },
+      [] { tab5_entropy_open = false; bootloader_random_disable(); });
+  if (!seeded) {
+    mbedtls_ctr_drbg_free(&tab5_drbg);
+    ESP_LOGE("hg.rng", "Tab5 entropy initialization failed");
+    abort();
+  }
+  tab5_rng_ready = true;
+}
+#endif
 
 uint32_t EspSystem::now_ms() { return static_cast<uint32_t>(esp_timer_get_time() / 1000); }
 
@@ -31,9 +68,21 @@ bool local_wall_time(hg::WallTime& out) {
 }
 
 void EspSystem::random_bytes(uint8_t* out, size_t len) {
-  // Hardware RNG; entropy is good once the radio is up, and the device key is
-  // generated after Wi-Fi starts (see main.cpp).
+#if CONFIG_HG_BOARD_M5STACK_TAB5
+  if (!tab5_rng_ready) abort();
+  while (len) {
+    const size_t n = len > MBEDTLS_CTR_DRBG_MAX_REQUEST ? MBEDTLS_CTR_DRBG_MAX_REQUEST : len;
+    if (mbedtls_ctr_drbg_random(&tab5_drbg, out, n) != 0) {
+      ESP_LOGE("hg.rng", "Tab5 random generator failed or requires reseeding");
+      abort();  // Never return a partial key or nonce to the caller.
+    }
+    out += n;
+    len -= n;
+  }
+#else
+  // Existing profiles retain their existing hardware-RNG behavior.
   esp_fill_random(out, len);
+#endif
 }
 
 void EspSystem::log(hg::LogLevel level, std::string_view message) {

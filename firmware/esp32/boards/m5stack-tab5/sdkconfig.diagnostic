@@ -1,0 +1,6 @@
+# Opt-in overlay: append AFTER sdkconfig.defaults and
+# boards/m5stack-tab5/sdkconfig.defaults in SDKCONFIG_DEFAULTS.
+# Use a fresh SDKCONFIG/build directory; defaults do not override cached values.
+# This does not modify the normal Tab5 or any other board's defaults.
+CONFIG_HG_BOARD_M5STACK_TAB5=y
+CONFIG_HG_TAB5_DIAGNOSTIC=y

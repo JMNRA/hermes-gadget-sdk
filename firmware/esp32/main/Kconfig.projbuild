@@ -1,5 +1,88 @@
 menu "Hermes Gadget"
 
+    choice HG_TAB5_STARTUP
+        prompt "Tab5 startup mode"
+        depends on HG_BOARD_M5STACK_TAB5
+        default HG_TAB5_STARTUP_NORMAL
+
+    config HG_TAB5_STARTUP_NORMAL
+        bool "Normal firmware (experimental; not security-validated)"
+
+    config HG_TAB5_DIAGNOSTIC
+        bool "Tab5 display/touch-only diagnostic (no application)"
+        help
+            Explicitly replace normal startup with RGB bars and serial touch
+            reports. Does not start the app, NVS, device identity, networking,
+            audio, or the command console. For original ILI9881C/GT911 Tab5
+            hardware only. Leave disabled for the full firmware.
+
+    config HG_TAB5_APP_OFFLINE
+        bool "Tab5 offline real-App diagnostic (host-controlled identity)"
+        help
+            Isolated local UI/navigation diagnostic, not production firmware.
+            Requires the USB Serial/JTAG host seed tool at each boot. Identity
+            is ephemeral and host-controlled; no NVS, network, audio, OTA or
+            command console is started. Transport remains inert.
+            USB ingress loss is not fully observable and historical exchanges
+            may replay. Neither the exchange nor its running marker provides
+            authentication or an entropy/security guarantee. Do not use this
+            mode for production credentials or authentication.
+
+    config HG_TAB5_MIC_OFFLINE
+        bool "Tab5 microphone-only diagnostic (live level over USB serial)"
+        help
+            Explicitly replace normal startup with one bounded microphone
+            probe: RX-only I2S plus the ES7210 ADC, reported as text level
+            lines over USB Serial/JTAG and one summary line at the end.
+            Never opens the ES8388 DAC, the amplifier or the expander, and
+            starts no app, NVS, identity, network, OTA or display. The session
+            stops at about 30 s and closes the ADC; running it again needs a
+            new boot. No audio is stored, transmitted or persisted. For
+            original Tab5 hardware only; leave disabled for the full firmware.
+
+    config HG_TAB5_SPEAKER_OFFLINE
+        bool "Tab5 speaker-only diagnostic (one tone after a USB serial start)"
+        help
+            Explicitly replace normal startup with one bounded speaker probe:
+            the ES8388 as a DAC only on a TX-only I2S channel, and the 0x43
+            expander's pin 1 amplifier enable through masked read-modify-writes
+            that are read back. Nothing plays at boot: the single 1 kHz, 250 ms
+            tone at about -40 dBFS needs an explicit 's' over USB Serial/JTAG
+            within 30 s, and it is written exactly once. Never opens the ES7210
+            or any ADC, never resets or caches the BSP expander driver, and
+            starts no app, NVS, identity, network, OTA or display. The last line
+            states SafeOff or Unknown; Unknown is reported whenever an amplifier
+            request or its readback failed. Running it again needs a new boot.
+            For original Tab5 hardware only; leave disabled for the full
+            firmware.
+
+    config HG_TAB5_AUDIO_UI
+        bool "Tab5 interactive audio diagnostic (screen, tone per tap, mic level)"
+        help
+            Explicitly replace normal startup with an on-screen audio check:
+            the confirmed 720x1280 display/touch preview stays live, every tap on
+            the top half of the panel plays one 1 kHz, 250 ms, about -12 dBFS
+            tone, and the bottom half measures the microphone for a few seconds
+            and shows the level. Nothing plays at boot, and taps repeat after a
+            short cooldown, so a tester can tap again without a reset; a tap
+            inside the cooldown or while a microphone window is open is refused
+            instead of queued. The tone goes through the reviewed speaker state
+            machine (masked expander read-modify-writes with readback, amplifier
+            requested off and read back immediately after each tone, Unknown
+            reported honestly and sticky). The amplifier enable convention is
+            the one measured on this unit: expander 0x43 pin 1 driven HIGH is
+            enabled, and the inverted level is no longer played automatically.
+            The status line is held for at least 1.5 s per state (playing, then
+            off and verified or unknown), with a persistent hint and a running
+            count of the tones played this boot. Every microphone tap opens the
+            ES7210 for a 4 s window and closes it at the bound: no continuous
+            capture, and no samples stored, streamed or logged. Starts no app,
+            NVS, identity, network, OTA, console or host seed exchange. Failures
+            are reported on screen. For original Tab5 hardware only; leave
+            disabled for the full firmware.
+
+    endchoice
+
     menu "Defaults (overridable from the serial console)"
         config HG_DEFAULT_NAME
             string "Device name"
@@ -126,6 +209,9 @@ menu "Hermes Gadget"
             bool "Elecrow CrowPanel 2.1-inch HMI (480x480 RGB, rotary, touch)"
         config HG_BOARD_CROWPANEL_50
             bool "Elecrow CrowPanel 5.0-inch HMI (800x480 RGB ILI6122, GT911 touch)"
+        config HG_BOARD_M5STACK_TAB5
+            bool "M5Stack Tab5 original (ILI9881C + GT911, display/touch only, experimental)"
+            depends on IDF_TARGET_ESP32P4
         config HG_BOARD_CROWPANEL_P4_101
             bool "Elecrow CrowPanel Advanced 10.1-inch ESP32-P4 (1024x600 DSI, GT911)"
             depends on IDF_TARGET_ESP32P4

@@ -1,0 +1,17 @@
+# Opt-in overlay: append AFTER sdkconfig.defaults and
+# boards/m5stack-tab5/sdkconfig.defaults in SDKCONFIG_DEFAULTS.
+# Use a fresh SDKCONFIG/build directory; defaults do not override cached values.
+# Interactive audio probe, not production firmware: the confirmed display/touch
+# preview stays live, the top half plays one 1 kHz / 250 ms tone per tap through
+# the reviewed speaker state machine (masked expander read-modify-write with
+# readback, amplifier off before and after, sticky Unknown), and the bottom half
+# measures the ES7210 for a 4 s window that closes the ADC at its bound. No app,
+# NVS, identity, network, OTA or storage; no samples retained. No hardware proof
+# of audibility, gain, amplifier polarity, channel mapping or microphone gain.
+CONFIG_HG_BOARD_M5STACK_TAB5=y
+# CONFIG_HG_TAB5_STARTUP_NORMAL is not set
+# CONFIG_HG_TAB5_DIAGNOSTIC is not set
+# CONFIG_HG_TAB5_APP_OFFLINE is not set
+# CONFIG_HG_TAB5_MIC_OFFLINE is not set
+# CONFIG_HG_TAB5_SPEAKER_OFFLINE is not set
+CONFIG_HG_TAB5_AUDIO_UI=y

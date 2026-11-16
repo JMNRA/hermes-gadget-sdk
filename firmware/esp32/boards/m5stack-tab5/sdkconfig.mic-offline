@@ -1,0 +1,12 @@
+# Opt-in overlay: append AFTER sdkconfig.defaults and
+# boards/m5stack-tab5/sdkconfig.defaults in SDKCONFIG_DEFAULTS.
+# Use a fresh SDKCONFIG/build directory; defaults do not override cached values.
+# Microphone-only probe, not production firmware: RX-only I2S plus the ES7210,
+# a live level on USB Serial/JTAG, and one summary line after ~30 s. No DAC,
+# amplifier, expander, app, NVS, identity, network, OTA or display. No hardware
+# proof of microphone capture, channel mapping or gain.
+CONFIG_HG_BOARD_M5STACK_TAB5=y
+# CONFIG_HG_TAB5_STARTUP_NORMAL is not set
+# CONFIG_HG_TAB5_DIAGNOSTIC is not set
+# CONFIG_HG_TAB5_APP_OFFLINE is not set
+CONFIG_HG_TAB5_MIC_OFFLINE=y

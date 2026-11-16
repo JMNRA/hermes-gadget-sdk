@@ -1,0 +1,10 @@
+# Opt-in overlay: append AFTER sdkconfig.defaults and
+# boards/m5stack-tab5/sdkconfig.defaults in SDKCONFIG_DEFAULTS.
+# Use a fresh SDKCONFIG/build directory; defaults do not override cached values.
+# Isolated offline real-App diagnostic, not production authentication/security.
+# Host-controlled ephemeral identity; USB loss and transcript replay remain possible.
+# No NVS, network, audio, OTA or command-console startup. No hardware proof.
+CONFIG_HG_BOARD_M5STACK_TAB5=y
+# CONFIG_HG_TAB5_STARTUP_NORMAL is not set
+# CONFIG_HG_TAB5_DIAGNOSTIC is not set
+CONFIG_HG_TAB5_APP_OFFLINE=y

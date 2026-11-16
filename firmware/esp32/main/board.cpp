@@ -1,4 +1,5 @@
 #include "board.hpp"
+#include "panel_tab5.hpp"
 
 #include "sdkconfig.h"
 
@@ -54,6 +55,8 @@ namespace {
 #define HG_BOARD_NAME "crowpanel-2.1"
 #elif CONFIG_HG_BOARD_CROWPANEL_50
 #define HG_BOARD_NAME "crowpanel-5.0"
+#elif CONFIG_HG_BOARD_M5STACK_TAB5
+#define HG_BOARD_NAME "m5stack-tab5"
 #elif CONFIG_HG_BOARD_CROWPANEL_P4_101
 #define HG_BOARD_NAME "crowpanel-advance-p4-10.1"
 #elif CONFIG_HG_BOARD_WS_P4_TOUCH_LCD_3_4C
@@ -72,7 +75,9 @@ namespace {
 constexpr char kBoardTag[] = "HGBOARD=" HG_BOARD_NAME;
 constexpr const char* kBoardName = kBoardTag + 8;
 
-#if CONFIG_HG_BOARD_ESP32S3_BREADBOARD
+#if CONFIG_HG_BOARD_M5STACK_TAB5
+BoardConfig make() { return tab5_config(kBoardName); }
+#elif CONFIG_HG_BOARD_ESP32S3_BREADBOARD
 // Wiring table: docs/hardware.md#esp32-s3-breadboard
 BoardConfig make() {
   BoardConfig b{};

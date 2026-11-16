@@ -121,7 +121,9 @@ struct Event {
 };
 
 namespace events {
-void init();
+// Startup-only: false on allocation failure; do not start producers/receive.
+// Existing callers may ignore the result; diagnostic startup checks it.
+bool init();
 // Copies `data`. Returns false (and drops the event) when the queue is full.
 bool post(EventType type, const void* data = nullptr, size_t len = 0, uint32_t generation = 0,
           ConsoleRequest* console = nullptr);
@@ -135,6 +137,10 @@ void release(Event& ev);
 // Local time from the system clock; false before a real date is set (RTC or
 // network). Shared by EspSystem::wall_time and the diag report.
 bool local_wall_time(hg::WallTime& out);
+#if CONFIG_HG_BOARD_M5STACK_TAB5
+// Seed before any subsystem can initialize or use the P4 SAR ADC.
+void tab5_rng_init();
+#endif
 
 class EspSystem final : public hg::System {
  public:

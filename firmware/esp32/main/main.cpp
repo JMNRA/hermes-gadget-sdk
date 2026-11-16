@@ -17,6 +17,59 @@
 #include "hg/touch.hpp"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
+#if CONFIG_HG_TAB5_APP_OFFLINE
+// Explicitly isolated diagnostic only: USB loss is not fully observable and
+// historical exchanges may replay. Host-controlled ephemeral identity is NOT
+// production authentication or evidence of hardware entropy.
+#include "tab5_offline_app.hpp"
+// The confirmed offline preview UI and its touch feedback, reused here without
+// the preview diagnostic build mode: the offline App never waits on a host with
+// a black panel.
+#include "tab5_diagnostic.hpp"
+#include "esp_random.h"
+#include "driver/usb_serial_jtag.h"
+#include "esp_timer.h"
+#if !CONFIG_HG_BOARD_M5STACK_TAB5 || CONFIG_HG_TAB5_DIAGNOSTIC
+#error "Tab5 offline App requires Tab5 and excludes the preview diagnostic"
+#endif
+#endif
+#if CONFIG_HG_TAB5_DIAGNOSTIC
+#include "tab5_diagnostic.hpp"
+#if !CONFIG_HG_BOARD_M5STACK_TAB5
+#error "The display/touch diagnostic is only supported on Tab5"
+#endif
+#endif
+#if CONFIG_HG_TAB5_MIC_OFFLINE
+// One bounded microphone probe: no App, NVS, identity, network, OTA, display or
+// speaker path, and no audio retention. It releases the ADC and never returns.
+#include "tab5_mic_diagnostic.hpp"
+#if !CONFIG_HG_BOARD_M5STACK_TAB5 || CONFIG_HG_TAB5_DIAGNOSTIC || CONFIG_HG_TAB5_APP_OFFLINE
+#error "The microphone diagnostic is a Tab5-only, mutually exclusive startup mode"
+#endif
+#endif
+#if CONFIG_HG_TAB5_SPEAKER_OFFLINE
+// One bounded speaker probe: no App, NVS, identity, network, OTA, display or
+// microphone path. The single tone needs a deliberate start, the amplifier is
+// requested off and read back, and the mode never returns.
+#include "tab5_speaker_diagnostic.hpp"
+#if !CONFIG_HG_BOARD_M5STACK_TAB5 || CONFIG_HG_TAB5_DIAGNOSTIC || CONFIG_HG_TAB5_APP_OFFLINE || \
+    CONFIG_HG_TAB5_MIC_OFFLINE
+#error "The speaker diagnostic is a Tab5-only, mutually exclusive startup mode"
+#endif
+#endif
+#if CONFIG_HG_TAB5_AUDIO_UI
+// Interactive audio probe: the preview screen and touch stay live while the top
+// half plays one tone per tap and the bottom half measures a short microphone
+// window. No App, NVS, identity, network, OTA, storage or host seed exchange.
+#include "tab5_audio_ui.hpp"
+#if !CONFIG_HG_BOARD_M5STACK_TAB5 || CONFIG_HG_TAB5_DIAGNOSTIC || CONFIG_HG_TAB5_APP_OFFLINE || \
+    CONFIG_HG_TAB5_MIC_OFFLINE || CONFIG_HG_TAB5_SPEAKER_OFFLINE
+#error "The interactive audio diagnostic is a Tab5-only, mutually exclusive startup mode"
+#endif
+#endif
+#if CONFIG_HG_BOARD_M5STACK_TAB5
+#include "panel_tab5.hpp"
+#endif
 #if CONFIG_HG_BOARD_WS_P4_TOUCH_LCD_7B
 #include "hg/crypto.hpp"
 #include "port_camera.hpp"
@@ -26,8 +79,53 @@
 #endif
 
 namespace {
-
 const char* TAG = "hg.main";
+}  // namespace
+
+namespace hgp {
+#if CONFIG_HG_BOARD_M5STACK_TAB5
+// The 0x43 display/touch gates and the GT911 probe the confirmed preview
+// diagnostic runs. Defined once here, never duplicated, so every Tab5
+// diagnostic mode brings the panel up with the same sequence
+// (tab5_audio_ui.cpp calls it as well).
+bool tab5_display_touch_gate(i2c_master_bus_handle_t bus) {
+  if (!bus) return false;
+  i2c_device_config_t config{};
+  config.device_address = 0x43;
+  config.scl_speed_hz = 400000;
+  i2c_master_dev_handle_t dev = nullptr;
+  if (i2c_master_bus_add_device(bus, &config, &dev) != ESP_OK) return false;
+  const bool ready = hgp::tab5_enable_display_touch(
+      [&](uint8_t reg, uint8_t& value) {
+        return i2c_master_transmit_receive(dev, &reg, 1, &value, 1, 100) == ESP_OK;
+      },
+      [&](uint8_t reg, uint8_t value) {
+        const uint8_t data[] = {reg, value};
+        return i2c_master_transmit(dev, data, sizeof(data), 100) == ESP_OK;
+      },
+      [&] {
+        vTaskDelay(pdMS_TO_TICKS(500) + 1);
+        // Identify the original touch before driving a pin shared by later revisions.
+        if (i2c_master_probe(bus, 0x14, 100) != ESP_OK) return false;
+        // BSP v1 workaround: hold GT911 INT low while polling the touch chip.
+        gpio_config_t pin{};
+        pin.pin_bit_mask = 1ULL << 23;
+        pin.mode = GPIO_MODE_OUTPUT;
+        pin.pull_up_en = GPIO_PULLUP_ENABLE;
+        if (gpio_config(&pin) != ESP_OK || gpio_set_level(GPIO_NUM_23, 0) != ESP_OK) {
+          if (gpio_reset_pin(GPIO_NUM_23) != ESP_OK)
+            ESP_LOGE(TAG, "Tab5 touch INT could not be released after setup failure");
+          return false;
+        }
+        return true;
+      });
+  i2c_master_bus_rm_device(dev);  // only our device handle, never the shared bus
+  return ready;
+}
+#endif
+}  // namespace hgp
+
+namespace {
 
 #if SOC_MIPI_DSI_SUPPORTED
 esp_ldo_channel_handle_t g_p4_vdd_io_ldo = nullptr;
@@ -46,6 +144,247 @@ bool enable_p4_vdd_io_rail() {
 }
 #endif
 
+#if CONFIG_HG_TAB5_APP_OFFLINE
+[[noreturn]] void stop_tab5_offline() {
+  // No reboot, retry, or normal-startup fallback. The host must use a fresh seed;
+  // repeated device challenges still permit an intact historical transcript.
+  for (;;) vTaskDelay(pdMS_TO_TICKS(1000));
+}
+
+// Best-effort, bounded host seed exchange. Returns true only when the verified
+// exchange handed a complete seed over inside the window. Every other outcome is
+// a plain "no host seed": the caller keeps the preview running.
+bool try_tab5_offline_seed(hgp::Tab5OfflineSeed& seed, hgp::Tab5OfflineExchange& exchange,
+                           const std::array<uint8_t, 16>& challenge, uint64_t window_start,
+                           std::array<uint8_t, 56>& running) {
+  auto now = [] { return static_cast<uint64_t>(esp_timer_get_time()/1000); };
+  usb_serial_jtag_driver_config_t usb{};
+  usb.tx_buffer_size = 256;
+  usb.rx_buffer_size = 256;
+  if (usb_serial_jtag_is_driver_installed() ||
+      usb_serial_jtag_driver_install(&usb) != ESP_OK) {
+    ESP_LOGW(TAG, "offline: USB Serial/JTAG unavailable");
+    return false;
+  }
+  uint8_t extra = 0;
+  // Reject buffered ingress, never flush evidence. Earlier hardware/FIFO drops
+  // remain unobservable with this driver. Proof/ACK rejects observed mismatches,
+  // but does not establish lossless ingress, freshness or authentication.
+  if (usb_serial_jtag_read_bytes(&extra, 1, 0) != 0) {
+    hgp::tab5_wipe(&extra, 1);
+    ESP_LOGW(TAG, "offline: USB ingress was not empty");
+    return false;
+  }
+  uint8_t ready[24]{};
+  std::memcpy(ready, "HGREADY3", 8);
+  std::memcpy(ready + 8, challenge.data(), challenge.size());
+  if (usb_serial_jtag_write_bytes(ready, sizeof(ready), pdMS_TO_TICKS(1000)) != sizeof(ready) ||
+      usb_serial_jtag_wait_tx_done(pdMS_TO_TICKS(1000)) != ESP_OK) {
+    ESP_LOGW(TAG, "offline: READY frame was not accepted by USB");
+    return false;
+  }
+  while (hgp::tab5_offline_window_open(window_start, now())) {
+    uint8_t bytes[57]{}; // one surplus byte makes an oversized frame fail closed
+    const int n = usb_serial_jtag_read_bytes(bytes, sizeof(bytes), pdMS_TO_TICKS(100));
+    const bool valid = n >= 0 && exchange.feed(bytes, static_cast<size_t>(n), now());
+    hgp::tab5_wipe(bytes, sizeof(bytes));
+    if (!valid) {
+      ESP_LOGW(TAG, "offline: host seed frame rejected");
+      return false;
+    }
+    if (exchange.awaiting_proof()) {
+      uint8_t proof[56]{};
+      const bool sent = exchange.response(proof, sizeof(proof), now()) &&
+          usb_serial_jtag_write_bytes(proof, sizeof(proof), pdMS_TO_TICKS(1000)) == sizeof(proof) &&
+          usb_serial_jtag_wait_tx_done(pdMS_TO_TICKS(1000)) == ESP_OK;
+      std::memcpy(running.data(), proof, running.size());
+      std::memcpy(running.data(), "HGRUN002", 8);
+      hgp::tab5_wipe(proof, sizeof(proof));
+      if (!sent) {
+        ESP_LOGW(TAG, "offline: proof frame was not accepted by USB");
+        return false;
+      }
+    }
+    if (exchange.accepted()) break;
+  }
+  if (!exchange.accepted()) {
+    ESP_LOGW(TAG, "offline: no host seed within %u ms",
+             static_cast<unsigned>(hgp::kTab5OfflineSeedWindowMs));
+    return false;
+  }
+  if (usb_serial_jtag_read_bytes(&extra, 1, pdMS_TO_TICKS(250)) != 0) {
+    hgp::tab5_wipe(&extra, 1);
+    ESP_LOGW(TAG, "offline: unexpected bytes after the ACK");
+    return false;
+  }
+  if (!exchange.finish(seed, now())) {
+    ESP_LOGW(TAG, "offline: seed handover outside the window");
+    return false;
+  }
+  return true;
+}
+
+// The fallback UI: the same confirmed preview the diagnostic build shows, with
+// its coordinate feedback. No App, identity, NVS, network or audio is created.
+[[noreturn]] void run_tab5_offline_preview(hg::Ui& ui, hg::UiModel& model, bool events_ready) {
+  ESP_LOGW(TAG, "offline preview only: no App, identity, NVS, network or audio");
+  for (;;) {
+    if (!events_ready) { // no event queue: keep the panel up and stay quiet
+      vTaskDelay(pdMS_TO_TICKS(1000));
+      continue;
+    }
+    hgp::Event event{};
+    if (!hgp::events::receive(event, pdMS_TO_TICKS(100))) continue;
+    if (event.type == hgp::EventType::Touch && event.data &&
+        event.len == sizeof(hgp::TouchSample)) {
+      hgp::TouchSample sample{};
+      std::memcpy(&sample, event.data, sizeof(sample));
+      ESP_LOGI(TAG, "preview touch %s x=%d y=%d", sample.touching ? "down/move" : "up",
+               static_cast<int>(sample.x), static_cast<int>(sample.y));
+      hgp::tab5_diagnostic_touch(model, sample.touching, sample.x, sample.y);
+      ui.render(model);
+    }
+    hgp::events::release(event);
+  }
+}
+
+void run_tab5_offline_app() {
+  const auto& board = hgp::board_config();
+  auto bus = hgp::i2c::bus(board.i2c);
+  if (!tab5_display_touch_gate(bus)) {
+    ESP_LOGE(TAG, "offline: display/touch gates or original GT911 probe failed");
+    stop_tab5_offline();
+  }
+  static hgp::DsiDisplay display;
+  if (!display.begin(board.lcd, board.lcd.dsi) || !display.framebuffer()) {
+    ESP_LOGE(TAG, "offline: display initialization failed");
+    stop_tab5_offline();
+  }
+  // The confirmed preview goes up before anything waits on USB: a reboot with no
+  // host seed must show this UI, never a black panel.
+  hg::Ui ui(display);
+  hg::UiModel preview = hgp::tab5_diagnostic_preview();
+  display.set_backlight(50); // the panel starts dark; App owns this on its route
+  ui.render(preview);
+  ESP_LOGI(TAG, "offline preview rendered; host seed window %u ms",
+           static_cast<unsigned>(hgp::kTab5OfflineSeedWindowMs));
+  const bool events_ready = hgp::events::init(); // no touch producer or receive on a null queue
+  static hgp::TouchInput touch;
+  if (!events_ready || !touch.begin(board.touch, {}, {}, bus))
+    ESP_LOGE(TAG, "offline: touch unavailable; the preview keeps running without input");
+
+  hgp::Tab5OfflineSeed seed;
+  auto now = [] { return static_cast<uint64_t>(esp_timer_get_time()/1000); };
+  // Best-effort replay discriminator ONLY, not cryptographic entropy. With
+  // radios/entropy disabled it may repeat after reset. Never seed keys from it.
+  std::array<uint8_t,16> challenge{};
+  esp_fill_random(challenge.data(), challenge.size());
+  const uint64_t timer = static_cast<uint64_t>(esp_timer_get_time());
+  for (size_t i=0; i<8; ++i) challenge[i] ^= static_cast<uint8_t>(timer >> (8*i));
+  const uint64_t window_start = now();
+  hgp::Tab5OfflineExchange exchange(window_start, challenge);
+  std::array<uint8_t,56> running{};
+  const bool seeded = try_tab5_offline_seed(seed, exchange, challenge, window_start, running);
+  if (hgp::tab5_offline_route(seeded,
+                              hgp::tab5_offline_window_open(window_start, now())) !=
+      hgp::Tab5OfflineRoute::App) {
+    // No host seed: keep the preview and its touch feedback. Nothing persistent
+    // was created, and any seed bytes already handed over are wiped here.
+    exchange.cancel();
+    seed.feed(nullptr, 1);
+    hgp::tab5_wipe(running.data(), running.size());
+    run_tab5_offline_preview(ui, preview, events_ready);
+  }
+  uint8_t extra = 0;
+  auto stop = [&] {
+    hgp::tab5_wipe(running.data(), running.size());
+    exchange.cancel(); seed.feed(nullptr, 1); stop_tab5_offline();
+  };
+  if (!events_ready) stop(); // the App loop dispatches touch through that queue
+  hgp::Tab5OfflineSystem system(seed, [] { return static_cast<uint32_t>(esp_timer_get_time()/1000); },
+                                stop_tab5_offline);
+  hgp::Tab5OfflineTransport transport;
+  hgp::Tab5OfflineStorage storage; // volatile settings only; no NVS or identity retention
+  auto hal = hgp::tab5_offline_hal(system, transport, display, storage);
+  hg::App app(hal, hgp::tab5_offline_profile(board.touch.ppi));
+  hg::TouchGestures gestures(app);
+  if (usb_serial_jtag_read_bytes(&extra, 1, 0) != 0) {
+    hgp::tab5_wipe(&extra, 1);
+    stop();
+  }
+  app.begin();
+  if (!system.consumed() || transport.violated()) stop();
+  if (usb_serial_jtag_write_bytes(running.data(), running.size(), pdMS_TO_TICKS(1000)) != sizeof(running) ||
+      usb_serial_jtag_wait_tx_done(pdMS_TO_TICKS(1000)) != ESP_OK) stop();
+  hgp::tab5_wipe(running.data(), running.size());
+  for (;;) {
+    // The USB session is one-shot: even a late second frame is a violation.
+    if (usb_serial_jtag_read_bytes(&extra, 1, 0) != 0) { hgp::tab5_wipe(&extra, 1); stop(); }
+    hgp::Event event{};
+    if (hgp::events::receive(event, pdMS_TO_TICKS(10))) {
+      const bool valid = event.type == hgp::EventType::Touch && event.data &&
+                         event.len == sizeof(hgp::TouchSample);
+      if (valid) {
+        hgp::TouchSample sample{};
+        std::memcpy(&sample, event.data, sizeof(sample));
+        gestures.update(sample.touching, sample.x, sample.y, system.now_ms());
+      }
+      hgp::events::release(event);
+      if (!valid) stop(); // never dispatch network, console, audio, or auth events
+    }
+    gestures.tick(system.now_ms());
+    app.tick();
+    if (transport.violated()) stop();
+  }
+}
+#elif CONFIG_HG_TAB5_DIAGNOSTIC
+// No full-firmware globals or startup are instantiated in this mode.
+void run_tab5_diagnostic() {
+  ESP_LOGI(TAG, "TAB5 DISPLAY/TOUCH DIAGNOSTIC: no app, storage, keys, network or audio startup");
+  const auto& board = hgp::board_config();
+  auto bus = hgp::i2c::bus(board.i2c);
+  if (!tab5_display_touch_gate(bus)) {
+    ESP_LOGE(TAG, "diagnostic stopped: display/touch gates or GT911 probe failed");
+    return;
+  }
+  static hgp::DsiDisplay display;
+  if (!display.begin(board.lcd, board.lcd.dsi) ||
+      !hgp::tab5_diagnostic_pattern(display.framebuffer(), board.lcd.width, board.lcd.height)) {
+    ESP_LOGE(TAG, "diagnostic stopped: display initialization failed");
+    return;
+  }
+  display.flush(0, board.lcd.height);
+  display.set_backlight(50);
+  ESP_LOGI(TAG, "pattern submitted: white border, red/green/blue bars (not physical proof)");
+  hgp::events::init();
+  static hgp::TouchInput touch;
+  if (!touch.begin(board.touch, {}, {}, bus)) {
+    ESP_LOGE(TAG, "diagnostic stopped: touch initialization failed");
+    return;
+  }
+  ESP_LOGI(TAG, "touch ready: reporting down/move/up coordinates over serial");
+  // Keep the startup color check visible, then use the real portable renderer
+  // directly. No App, settings actions, or services are attached to this model.
+  vTaskDelay(pdMS_TO_TICKS(1500));
+  hg::Ui ui(display);
+  auto model = hgp::tab5_diagnostic_preview();
+  ui.render(model);
+  ESP_LOGI(TAG, "local Hermes UI preview submitted (offline; touch feedback only)");
+  for (;;) {
+    hgp::Event event{};
+    if (!hgp::events::receive(event, pdMS_TO_TICKS(100))) continue;
+    if (event.type == hgp::EventType::Touch && event.data && event.len == sizeof(hgp::TouchSample)) {
+      hgp::TouchSample sample{};
+      std::memcpy(&sample, event.data, sizeof(sample));
+      ESP_LOGI(TAG, "touch %s x=%d y=%d", sample.touching ? "down/move" : "up",
+               static_cast<int>(sample.x), static_cast<int>(sample.y));
+      hgp::tab5_diagnostic_touch(model, sample.touching, sample.x, sample.y);
+      ui.render(model);
+    }
+    hgp::events::release(event);
+  }
+}
+#else
 hgp::EspSystem g_system;
 hgp::NvsStorage g_storage;
 hgp::WsTransport g_transport;
@@ -291,9 +630,26 @@ void dispatch(hg::App& app, hgp::Event& ev) {
   }
 }
 
+#endif  // CONFIG_HG_TAB5_DIAGNOSTIC
 }  // namespace
 
 extern "C" void app_main(void) {
+#if CONFIG_HG_TAB5_APP_OFFLINE
+  run_tab5_offline_app();
+  stop_tab5_offline();
+#elif CONFIG_HG_TAB5_DIAGNOSTIC
+  run_tab5_diagnostic();
+  // Failure never falls through to full firmware or retries peripheral setup.
+#elif CONFIG_HG_TAB5_MIC_OFFLINE
+  hgp::tab5_mic_diagnostic_run();  // bounded session, releases the ADC, no return
+#elif CONFIG_HG_TAB5_SPEAKER_OFFLINE
+  hgp::tab5_speaker_diagnostic_run();  // one tone after a deliberate start, no return
+#elif CONFIG_HG_TAB5_AUDIO_UI
+  hgp::tab5_audio_ui_run();  // screen, one tone per tap, bounded mic windows, no return
+#else
+#if CONFIG_HG_BOARD_M5STACK_TAB5
+  hgp::tab5_rng_init();  // The SAR ADC must be exclusive during this early seed window.
+#endif
   hgp::diag::begin();  // first, so `diag log` has the whole boot
   init_nvs();
   hgp::events::init();
@@ -336,7 +692,8 @@ extern "C" void app_main(void) {
   g_updater.expect_board(board.name);
   g_updater.start();  // a new firmware on probation starts its clock now
 
-  // Wi-Fi first: the radio is the entropy source for the device key.
+  // Shared network/event infrastructure first. Tab5's display-only profile
+  // returns before Wi-Fi initialization; it never starts the hosted transport.
   g_wifi.begin(g_storage);
 
   hg::Hal hal;
@@ -372,10 +729,15 @@ extern "C" void app_main(void) {
 #else
   bool io_rail_ready = true;
 #if SOC_MIPI_DSI_SUPPORTED
-  if (board.lcd.bus.type == hgp::LcdBus::Type::Dsi) io_rail_ready = enable_p4_vdd_io_rail();
+  if (board.lcd.bus.type == hgp::LcdBus::Type::Dsi && board.lcd.dsi.vdd_io_ldo4)
+    io_rail_ready = enable_p4_vdd_io_rail();
 #endif
   // GPIO45/46 belong to VDD_IO_5 on the P4; acquire LDO4 before creating I2C0.
   i2c_master_bus_handle_t i2c_bus = io_rail_ready ? hgp::i2c::bus(board.i2c) : nullptr;
+#if CONFIG_HG_BOARD_M5STACK_TAB5
+  io_rail_ready = io_rail_ready && tab5_display_touch_gate(i2c_bus);
+  if (!io_rail_ready) ESP_LOGE(TAG, "Tab5 display/touch gates or original GT911 probe failed");
+#endif
   const bool peripherals_ready = io_rail_ready && (!board.cores3 || g_cores3.begin(i2c_bus)) &&
       (!board.sticks3 || g_sticks3.begin(i2c_bus)) &&
       (!board.expander_reset.mask || hgp::tca9554_reset(i2c_bus, board.expander_reset)) &&
@@ -567,10 +929,12 @@ extern "C" void app_main(void) {
     app.on_tailnet_forget = [] { return g_tailnet.forget(); };
   }
 #endif
-  app.on_wifi_setup = [] { return g_wifi.start_setup(); };
-  app.on_wifi_setup_close = [] { g_wifi.stop_setup(); };
-  app.on_wifi_setup_ap = [] { return g_wifi.setup_ap(); };
-  app.current_wifi = [] { return g_wifi.current(); };
+  if (board.radio_enabled) {
+    app.on_wifi_setup = [] { return g_wifi.start_setup(); };
+    app.on_wifi_setup_close = [] { return g_wifi.stop_setup(); };
+    app.on_wifi_setup_ap = [] { return g_wifi.setup_ap(); };
+    app.current_wifi = [] { return g_wifi.current(); };
+  }
   app.on_diag = [](hg::json::Value& report) {
     hgp::diag::report(report);
     report.set("ota", g_updater.describe());
@@ -645,4 +1009,5 @@ extern "C" void app_main(void) {
     }
 #endif
   }
+#endif  // startup mode: diagnostic modes run and halt above
 }

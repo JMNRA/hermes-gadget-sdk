@@ -4,16 +4,35 @@ if(NOT CMAKE_SCRIPT_MODE_FILE)
     configure_file(wifi_setup_page.hpp.in wifi_setup_page.hpp @ONLY)
 endif()
 
+# The hosted component installs a constructor which starts the transport before
+# app_main. The experimental Tab5 profile must not start hosted or drive its
+# default SDIO pins; retain the component for the remote Wi-Fi link dependency.
+if(CONFIG_HG_BOARD_M5STACK_TAB5)
+    idf_component_get_property(HG_HOSTED_LIB espressif__esp_hosted COMPONENT_LIB)
+    get_target_property(HG_HOSTED_SOURCES ${HG_HOSTED_LIB} SOURCES)
+    set(HG_HOSTED_ORIGINAL_SOURCES ${HG_HOSTED_SOURCES})
+    list(FILTER HG_HOSTED_SOURCES EXCLUDE REGEX "port_esp_hosted_host_init[.]c$")
+    if(HG_HOSTED_SOURCES STREQUAL HG_HOSTED_ORIGINAL_SOURCES)
+        message(FATAL_ERROR "Tab5: ESP-Hosted constructor source was not found; refusing unsafe build")
+    endif()
+    set_property(TARGET ${HG_HOSTED_LIB} PROPERTY SOURCES "${HG_HOSTED_SOURCES}")
+endif()
+
 set(HG_P4_SOURCES)
 set(HG_P4_REQUIRES)
 set(HG_RGB_REQUIRES)
+set(HG_OFFLINE_REQUIRES)
+if(CONFIG_HG_TAB5_APP_OFFLINE OR CONFIG_HG_TAB5_SPEAKER_OFFLINE)
+    # Both read one byte at a time from USB Serial/JTAG (host seed, start byte).
+    list(APPEND HG_OFFLINE_REQUIRES esp_driver_usb_serial_jtag)
+endif()
 if(IDF_TARGET STREQUAL "esp32p4")
     list(APPEND HG_P4_SOURCES
         "port_dsi.cpp"
         "port_audio_p4.cpp"
         "port_power_p4.cpp"
         "../../drivers/stc8_battery.cpp")
-    list(APPEND HG_P4_REQUIRES esp_lcd_ek79007 esp_lcd_st7123)
+    list(APPEND HG_P4_REQUIRES esp_lcd_ek79007 esp_lcd_st7123 esp_lcd_ili9881c)
     if(CONFIG_HG_BOARD_WS_P4_TOUCH_LCD_7B)
         list(APPEND HG_P4_SOURCES "port_camera.cpp")
         list(APPEND HG_P4_REQUIRES esp_video)
@@ -64,6 +83,9 @@ idf_component_register(
         "port_wifi.cpp"
         "port_wifi_setup.cpp"
         "port_ws.cpp"
+        "tab5_mic_diagnostic.cpp"
+        "tab5_speaker_diagnostic.cpp"
+        "tab5_audio_ui.cpp"
     INCLUDE_DIRS "." "../../drivers" "${CMAKE_CURRENT_BINARY_DIR}"
     REQUIRES core
     # "driver" pulls in GPIO, I2S, LEDC and SPI on every ESP-IDF 5.x release.
@@ -71,6 +93,7 @@ idf_component_register(
     # too; all three components exist in 5.x as well, where this is a no-op.
     PRIV_REQUIRES
         app_update
+        bootloader_support
         bt
         driver
         esp_driver_i2s
@@ -81,6 +104,7 @@ idf_component_register(
         esp_event
         esp_lcd
         ${HG_RGB_REQUIRES}
+        ${HG_OFFLINE_REQUIRES}
         ${HG_P4_REQUIRES}
         esp_netif
         esp_http_server

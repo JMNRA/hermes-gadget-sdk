@@ -26,6 +26,8 @@ void Wifi::begin(NvsStorage& storage) {
   fast_.load(storage.get(hg::WifiFastJoin::kStorageKey));
   ESP_ERROR_CHECK(esp_netif_init());
   ESP_ERROR_CHECK(esp_event_loop_create_default());
+  // Display/touch-only Tab5: no esp_wifi_init/start, hosted SDIO or C6 reset.
+  if (!board_config().radio_enabled) return;
   esp_netif_create_default_wifi_sta();
   esp_netif_create_default_wifi_ap();
   wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
@@ -165,6 +167,7 @@ void Wifi::reconfigure() {
 }
 
 void Wifi::networks_changed() {
+  if (!board_config().radio_enabled) return;
   networks_ = hg::WifiNetworks::load(*storage_);
   if (networks_.dirty()) networks_.save(*storage_);
   forget_unsaved_ap();
@@ -240,6 +243,7 @@ void Wifi::provision(const hg::WifiCredentials& credentials) {
 }
 
 void Wifi::tick(hg::App& app, uint32_t now) {
+  if (!board_config().radio_enabled) return;
   if (auto_setup_) {
     auto_setup_ = false;
     auto_setup_tried_ = true;

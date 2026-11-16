@@ -31,6 +31,7 @@
 #include "esp_lcd_ek79007.h"
 #include "esp_lcd_jd9365.h"
 #include "esp_lcd_st7123.h"
+#include "../boards/m5stack-tab5/panel_init.hpp"
 #include "esp_idf_version.h"
 #include "esp_lcd_mipi_dsi.h"
 #include "esp_lcd_panel_ops.h"
@@ -368,7 +369,21 @@ bool DsiDisplay::begin(const LcdConfig& cfg, const DsiPanelConfig& dsi) {
   panel_cfg.reset_gpio_num = (cfg.rst >= 0) ? static_cast<gpio_num_t>(cfg.rst) : GPIO_NUM_NC;
   panel_cfg.rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB;
   panel_cfg.bits_per_pixel = 16;
-  if (dsi_.controller == DsiController::Jd9365) {
+  if (dsi_.controller == DsiController::Ili9881c) {
+    ili9881c_vendor_config_t vendor = {};
+    vendor.init_cmds = kTab5Init;
+    vendor.init_cmds_size = sizeof(kTab5Init) / sizeof(kTab5Init[0]);
+    vendor.mipi_config.dsi_bus = bus_;
+    vendor.mipi_config.dpi_config = &dpi;
+    vendor.mipi_config.lane_num = dsi_.lanes;
+    panel_cfg.vendor_config = &vendor;
+    err = esp_lcd_new_panel_ili9881c(io_, &panel_cfg, &panel_);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "ILI9881C panel creation failed: %s", esp_err_to_name(err));
+      return false;
+    }
+    controller_name_ = "ili9881c-dsi";
+  } else if (dsi_.controller == DsiController::Jd9365) {
     jd9365_vendor_config_t vendor = {};
     vendor.init_cmds = kJd9365InitCmds;
     vendor.init_cmds_size = sizeof(kJd9365InitCmds) / sizeof(kJd9365InitCmds[0]);
@@ -463,6 +478,14 @@ bool DsiDisplay::begin(const LcdConfig& cfg, const DsiPanelConfig& dsi) {
   err = esp_lcd_panel_init(panel_);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "panel init failed: %s", esp_err_to_name(err));
+    return false;
+  }
+
+  if (dsi_.controller == DsiController::Ili9881c &&
+      (esp_lcd_panel_invert_color(panel_, false) != ESP_OK ||
+       esp_lcd_panel_mirror(panel_, false, false) != ESP_OK ||
+       esp_lcd_panel_disp_on_off(panel_, true) != ESP_OK)) {
+    ESP_LOGE(TAG, "ILI9881C display enable/orientation failed");
     return false;
   }
 

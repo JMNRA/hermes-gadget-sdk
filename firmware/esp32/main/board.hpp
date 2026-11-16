@@ -56,7 +56,7 @@ struct RgbPanelConfig {
 // MIPI-DSI panel controller. Only meaningful when bus.type == Type::Dsi.
 // St7123 uses Espressif esp_lcd_st7123 1.0.2 and that component's default init.
 // No board selects it yet.
-enum class DsiController { Ek79007, Jd9365, St7123 };
+enum class DsiController { Ek79007, Jd9365, St7123, Ili9881c };
 
 // A MIPI-DSI panel: a serial bus on dedicated SoC pins (no GPIO numbers), a
 // PHY that needs its own internal LDO rail, and a DPI clock. The CrowPanel and
@@ -72,6 +72,7 @@ struct DsiPanelConfig {
   // Let ESP-IDF choose the DSI PHY clock source for the chip revision instead of
   // MIPI_DSI_PHY_CLK_SRC_DEFAULT (needed on the 7B's P4 rev 3.x).
   bool phy_clk_auto = false;
+  bool vdd_io_ldo4 = true;  // legacy P4 GPIO45/46 rail; Tab5 does not request it
   // Video timing; the P4's EK79007 panel's porches are wide.
   int hsync_pulse_width = 70, hsync_back_porch = 160, hsync_front_porch = 160;
   int vsync_pulse_width = 10, vsync_back_porch = 23, vsync_front_porch = 12;
@@ -344,6 +345,7 @@ struct BoardConfig {
   // boards only) and stays off until the board passes the checks in
   // docs/hardware-validation.md#tailnet.
   bool tailnet = false;
+  bool radio_enabled = true;  // false for the display/touch-only Tab5 bring-up
   LatchPowerConfig latch_power;
   int status_led = -1;
   // A speaker driven by the chip's own DAC, with no I2S and no codec: the pin the

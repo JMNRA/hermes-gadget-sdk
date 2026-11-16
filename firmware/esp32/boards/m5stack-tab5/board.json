@@ -1,0 +1,6 @@
+{
+  "title": "M5Stack Tab5 (original, experimental)",
+  "summary": "ILI9881C 720×1280 portrait display and GT911 touch only; radio and audio disabled. Not for ST712x revisions.",
+  "docs": "docs/hardware.md#m5stack-tab5",
+  "ready_made": true
+}
