@@ -72,6 +72,11 @@
 #if CONFIG_HG_BOARD_M5STACK_TAB5
 #include "panel_tab5.hpp"
 #endif
+#if CONFIG_ESP_HOSTED_ENABLED
+// esp_hosted_init: the P4 boards reach the C6 through ESP-Hosted, whose own
+// pre-main constructor is excluded for Tab5 (main/CMakeLists.txt).
+#include "esp_hosted.h"
+#endif
 #if CONFIG_HG_BOARD_WS_P4_TOUCH_LCD_7B || CONFIG_HG_BOARD_CORES3
 #include "hg/crypto.hpp"
 #include "port_camera.hpp"
@@ -813,8 +818,42 @@ extern "C" void app_main(void) {
   g_updater.expect_board(board.name);
   g_updater.start();  // a new firmware on probation starts its clock now
 
-  // Shared network/event infrastructure first. Tab5's display-only profile
-  // returns before Wi-Fi initialization; it never starts the hosted transport.
+  // Shared network/event infrastructure first. The Tab5 profile has the radio
+  // on, so the hosted SDIO transport must be configured before esp_wifi_init
+  // (esp_wifi_remote only reconfigures an initialised transport). It is started
+  // here rather than in ESP-Hosted's constructor so the display/audio
+  // diagnostic images above never touch the C6, and so it runs after this
+  // board's rails and display/touch gates. The reset pulse and card init that
+  // prove the pin map happen in the first esp_wifi_init below; a failure there
+  // aborts, and the unit is recovered by reflashing a known-good image.
+#if CONFIG_HG_BOARD_M5STACK_TAB5
+  if (board.radio_enabled) {
+    // The C6 sits behind its own power gate on the second expander (0x44 pin 0);
+    // without it the SDIO card never answers.
+    {
+      i2c_device_config_t c6{};
+      c6.device_address = 0x44;
+      c6.scl_speed_hz = 400000;
+      i2c_master_dev_handle_t dev = nullptr;
+      bool powered = false;
+      if (i2c_master_bus_add_device(hgp::i2c::bus(board.i2c), &c6, &dev) == ESP_OK) {
+        powered = hgp::tab5_enable_wifi_power(
+            [&](uint8_t reg, uint8_t& value) {
+              return i2c_master_transmit_receive(dev, &reg, 1, &value, 1, 100) == ESP_OK;
+            },
+            [&](uint8_t reg, uint8_t value) {
+              const uint8_t data[] = {reg, value};
+              return i2c_master_transmit(dev, data, sizeof(data), 100) == ESP_OK;
+            });
+        i2c_master_bus_rm_device(dev);
+      }
+      if (powered) ESP_LOGI(TAG, "Tab5: C6 power gate enabled (expander 0x44 pin 0)");
+      else ESP_LOGE(TAG, "Tab5: the C6 power gate could not be enabled; the radio will fail");
+    }
+    ESP_LOGI(TAG, "Tab5: starting the ESP-Hosted SDIO transport");
+    if (esp_hosted_init() != ESP_OK) ESP_LOGE(TAG, "Tab5: ESP-Hosted transport init failed");
+  }
+#endif
   g_wifi.begin(g_storage);
 
   hg::Hal hal;

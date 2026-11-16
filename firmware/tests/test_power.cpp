@@ -1,6 +1,9 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <fstream>
+#include <map>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -1461,9 +1464,12 @@ TEST("Tab5 audio UI: each tone drives the confirmed HIGH enable and then verifie
   CHECK(failed.model().detail.find("do not assume") != std::string::npos);
 }
 
-TEST("Tab5: profile keeps radio off and does not inherit GPIO45/46 LDO") {
+TEST("Tab5: profile enables the radio and does not inherit GPIO45/46 LDO") {
   const auto b = hgp::tab5_config("m5stack-tab5");
-  CHECK(!b.radio_enabled);
+  // The radio is on: the C6 SDIO map lives in this board's sdkconfig defaults
+  // and main.cpp starts ESP-Hosted in the normal startup path only, never in
+  // the pre-main constructor or the display/audio diagnostic modes.
+  CHECK(b.radio_enabled);
   CHECK(!b.lcd.dsi.vdd_io_ldo4);
   // The codec profile is carried now (the measured ES8388/ES7210 path); the
   // chip's own I2S mic/speaker and the P4 codec-less speaker stay unused.
@@ -1481,6 +1487,76 @@ TEST("Tab5: profile keeps radio off and does not inherit GPIO45/46 LDO") {
   const hgp::BoardConfig legacy{};
   CHECK(legacy.radio_enabled);
   CHECK(legacy.lcd.dsi.vdd_io_ldo4);
+}
+
+// The hosted transport is wiring, not code: check_config.py already fails a
+// build whose defaults never reached the generated sdkconfig, so what is left
+// to pin here is which map those defaults carry -- this unit's historical
+// factory boot log (CLK 12, CMD 13, D0-D3 11/10/9/8, reset 15) and never the
+// ESP-Hosted P4-dev-board default (CMD 19, CLK 18, D0-D3 14-17, reset 54).
+TEST("Tab5: hosted SDIO defaults carry the factory C6 map") {
+  const std::string source = __FILE__;
+  const std::string here = source.substr(0, source.find_last_of("/\\") + 1);
+  // Make/Ninja compile with an absolute path; a generator that emits a
+  // relative one still resolves against the build tree ctest runs in.
+  const std::string candidates[] = {
+      here + "../esp32/boards/m5stack-tab5/sdkconfig.defaults",
+      "../../firmware/esp32/boards/m5stack-tab5/sdkconfig.defaults",
+  };
+  std::ifstream file;
+  for (const auto& path : candidates) {
+    file.open(path);
+    if (file) break;
+    file.clear();
+  }
+  CHECK(file.is_open());
+  if (!file.is_open()) return;
+  auto trim = [](std::string line) {
+    const auto first = line.find_first_not_of(" \t");
+    line = first == std::string::npos ? std::string() : line.substr(first);
+    while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t')) line.pop_back();
+    return line;
+  };
+  std::map<std::string, std::string> defaults;
+  std::string raw;
+  while (std::getline(file, raw)) {
+    const std::string line = trim(raw);
+    if (line.rfind("CONFIG_", 0) == 0) {
+      const auto eq = line.find('=');
+      if (eq != std::string::npos) defaults[line.substr(7, eq - 7)] = line.substr(eq + 1);
+    } else if (line.rfind("# CONFIG_", 0) == 0 && line.size() > 20 &&
+               line.compare(line.size() - 11, 11, " is not set") == 0) {
+      defaults[line.substr(9, line.size() - 9 - 11)] = "n";
+    }
+  }
+  const auto value = [&](const std::string& symbol) {
+    const auto it = defaults.find(symbol);
+    return it == defaults.end() ? std::string("<absent>") : it->second;
+  };
+  // Slot 1 is the P4's C6 slot (slot 0 is the microSD card the BSP owns).
+  CHECK_EQ(value("ESP_HOSTED_SDIO_HOST_INTERFACE"), std::string("y"));
+  CHECK_EQ(value("ESP_HOSTED_SDIO_SLOT_1"), std::string("y"));
+  CHECK_EQ(value("ESP_HOSTED_SDIO_SLOT_0"), std::string("n"));
+  CHECK_EQ(value("ESP_HOSTED_SDIO_4_BIT_BUS"), std::string("y"));
+  CHECK_EQ(value("ESP_HOSTED_SDIO_BUS_WIDTH"), std::string("4"));
+  CHECK_EQ(value("ESP_HOSTED_SDIO_CLOCK_FREQ_KHZ"), std::string("40000"));
+  // The pins the factory firmware printed: CLK 12, CMD 13, D0-D3 11/10/9/8.
+  CHECK_EQ(value("ESP_HOSTED_PRIV_SDIO_PIN_CLK_SLOT_1"), std::string("12"));
+  CHECK_EQ(value("ESP_HOSTED_PRIV_SDIO_PIN_CMD_SLOT_1"), std::string("13"));
+  CHECK_EQ(value("ESP_HOSTED_PRIV_SDIO_PIN_D0_SLOT_1"), std::string("11"));
+  CHECK_EQ(value("ESP_HOSTED_PRIV_SDIO_PIN_D1_4BIT_BUS_SLOT_1"), std::string("10"));
+  CHECK_EQ(value("ESP_HOSTED_PRIV_SDIO_PIN_D2_4BIT_BUS_SLOT_1"), std::string("9"));
+  CHECK_EQ(value("ESP_HOSTED_PRIV_SDIO_PIN_D3_4BIT_BUS_SLOT_1"), std::string("8"));
+  // Slave reset on the pin the factory log drove, active high: the line rests
+  // HIGH and a LOW pulse resets, leaving the C6's EN running afterwards.
+  CHECK_EQ(value("ESP_HOSTED_SDIO_GPIO_RESET_SLAVE"), std::string("15"));
+  CHECK_EQ(value("ESP_HOSTED_SDIO_RESET_ACTIVE_HIGH"), std::string("y"));
+  CHECK_EQ(value("ESP_HOSTED_SDIO_RESET_ACTIVE_LOW"), std::string("n"));
+  CHECK_EQ(value("ESP_HOSTED_IDF_SLAVE_TARGET"), std::string("\"esp32c6\""));
+  // Neither the pre-main mempool allocation nor the host restart on a
+  // transport failure: a wrong map must report, not reboot the unit.
+  CHECK_EQ(value("ESP_HOSTED_USE_MEMPOOL"), std::string("n"));
+  CHECK_EQ(value("ESP_HOSTED_TRANSPORT_RESTART_ON_FAILURE"), std::string("n"));
 }
 
 TEST("Tab5: profile carries the measured ES8388 speaker and ES7210 microphone") {
@@ -1648,6 +1724,33 @@ TEST("Tab5: a failed amplifier request is reported as unknown, never as off") {
   CHECK(line.find("not off") != std::string::npos);
   CHECK(line.find("reboot") != std::string::npos);
   CHECK(line.find("amplifier is off") == std::string::npos);
+}
+
+TEST("Tab5: C6 power gate drives only pin 0 of the second expander") {
+  for (unsigned initial : {0u, 0xffu, 0x55u, 0xaau}) {
+    std::array<uint8_t, 256> regs;
+    regs.fill(static_cast<uint8_t>(initial));
+    std::vector<uint8_t> order;
+    CHECK(hgp::tab5_enable_wifi_power(
+        [&](uint8_t reg, uint8_t& value) { value = regs[reg]; return true; },
+        [&](uint8_t reg, uint8_t value) {
+          CHECK_EQ(value & ~0x01u, regs[reg] & ~0x01u);
+          regs[reg] = value;
+          order.push_back(reg);
+          return true;
+        }));
+    // Latch high while still an input, then push-pull, then output: no low glitch.
+    CHECK(order == std::vector<uint8_t>({0x05, 0x07, 0x03}));
+    CHECK_EQ(regs[0x05] & 0x01, 0x01);
+    CHECK_EQ(regs[0x07] & 0x01, 0x00);
+    CHECK_EQ(regs[0x03] & 0x01, 0x01);
+  }
+  int operations = 0;
+  std::array<uint8_t, 256> regs;
+  regs.fill(0);
+  CHECK(!hgp::tab5_enable_wifi_power(
+      [&](uint8_t reg, uint8_t& value) { value = regs[reg]; return operations++ != 2; },
+      [&](uint8_t reg, uint8_t value) { regs[reg] = value; return operations++ != 2; }));
 }
 
 TEST("Tab5: initialize speaker amplifier off without changing other expander pins") {

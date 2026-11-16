@@ -7,7 +7,10 @@ namespace hgp {
 inline BoardConfig tab5_config(const char* name) {
   BoardConfig b{};
   b.name = name;
-  b.radio_enabled = false;
+  // The radio is on: the C6 rides SDIO slot 1 with the pin map in this board's
+  // sdkconfig.defaults, and only the normal startup path starts ESP-Hosted
+  // (main.cpp), so the display/audio diagnostics never touch the C6.
+  b.radio_enabled = true;
   b.i2c = {31, 32, 400000};
   b.lcd.enabled = true;
   b.lcd.width = 720;
@@ -88,6 +91,20 @@ struct Tab5SpeakerPins {
 inline constexpr Tab5SpeakerPins tab5_speaker_pins() {
   // BSP_I2S_MCLK/SCLK/LCLK/DOUT. The microphone input is not part of this map.
   return Tab5SpeakerPins{30, 27, 29, 26};
+}
+
+// The ESP32-C6 sits behind its own power gate: a second PI4IOE5V6408 at 0x44,
+// pin 0 (BSP_WIFI_EN), active high. Drive the latch high before turning the pin
+// into an output so enabling it cannot glitch the C6 supply low. Only pin 0 is
+// changed; requires the same exclusive ownership as the other expander writes.
+template<class Read, class Write>
+bool tab5_enable_wifi_power(Read read, Write write) {
+  auto update = [&](uint8_t reg, uint8_t value) {
+    uint8_t current = 0;
+    if (!read(reg, current)) return false;
+    return write(reg, static_cast<uint8_t>((current & ~0x01u) | value));
+  };
+  return update(0x05, 0x01) && update(0x07, 0x00) && update(0x03, 0x01);
 }
 
 // Prepare the PA control as a low push-pull output before audio starts.

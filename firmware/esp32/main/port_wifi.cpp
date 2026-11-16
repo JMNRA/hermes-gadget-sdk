@@ -26,12 +26,23 @@ void Wifi::begin(NvsStorage& storage) {
   fast_.load(storage.get(hg::WifiFastJoin::kStorageKey));
   ESP_ERROR_CHECK(esp_netif_init());
   ESP_ERROR_CHECK(esp_event_loop_create_default());
-  // Display/touch-only Tab5: no esp_wifi_init/start, hosted SDIO or C6 reset.
+  // A display/audio-only profile (radio_enabled=false) skips Wi-Fi entirely.
+  // Tab5's radio is on, and its ESP-Hosted transport is initialised by the
+  // caller before this: esp_wifi_init only reconfigures one that exists.
   if (!board_config().radio_enabled) return;
   esp_netif_create_default_wifi_sta();
   esp_netif_create_default_wifi_ap();
   wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
+#if CONFIG_HG_BOARD_M5STACK_TAB5
+  // The C6 link is not physically verified on this board: a dead or mis-mapped
+  // slave must leave the gadget usable without radio instead of aborting.
+  if (esp_wifi_init(&init) != ESP_OK) {
+    ESP_LOGE("hg.wifi", "the C6 transport did not answer; running without Wi-Fi");
+    return;
+  }
+#else
   ESP_ERROR_CHECK(esp_wifi_init(&init));
+#endif
   // Credentials remain in our NVS store until a phone setup succeeds.
   ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
   ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &Wifi::on_event, this));

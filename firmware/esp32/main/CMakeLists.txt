@@ -4,9 +4,12 @@ if(NOT CMAKE_SCRIPT_MODE_FILE)
     configure_file(wifi_setup_page.hpp.in wifi_setup_page.hpp @ONLY)
 endif()
 
-# The hosted component installs a constructor which starts the transport before
-# app_main. The experimental Tab5 profile must not start hosted or drive its
-# default SDIO pins; retain the component for the remote Wi-Fi link dependency.
+# The hosted component installs a constructor which starts the SDIO transport
+# before app_main. This board must not start it there: the display, touch,
+# microphone and audio diagnostic images are radio-free, and the normal image
+# starts the transport explicitly in app_main after its rails and display gates
+# (main.cpp) and before esp_wifi_init. The component stays linked for the
+# remote Wi-Fi dependency, and esp_hosted_init() is resolved from it.
 if(CONFIG_HG_BOARD_M5STACK_TAB5)
     idf_component_get_property(HG_HOSTED_LIB espressif__esp_hosted COMPONENT_LIB)
     get_target_property(HG_HOSTED_SOURCES ${HG_HOSTED_LIB} SOURCES)
