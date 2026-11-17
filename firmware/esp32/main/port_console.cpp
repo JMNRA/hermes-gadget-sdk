@@ -6,10 +6,16 @@
 #include <cstring>
 #include <string>
 
+#include "board.hpp"
 #include "esp_console.h"
 #include "esp_log.h"
 #include "hg/console_args.hpp"
 #include "sdkconfig.h"
+#if CONFIG_HG_BOARD_M5STACK_TAB5
+#include "driver/gpio.h"
+#include "esp_timer.h"
+#include "panel_tab5.hpp"
+#endif
 #if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
 #include "driver/usb_serial_jtag.h"
 #include "freertos/task.h"
@@ -21,7 +27,158 @@ namespace {
 
 const char* TAG = "hg.console";
 
+#if CONFIG_HG_BOARD_M5STACK_TAB5
+// The Tab5 PWR probe (panel_tab5.hpp): the whole hardware surface it is allowed
+// to touch, in one place, and all of it read-only. It answers here on the
+// console task rather than in the app so it works even while that task is stuck,
+// and it never writes an expander register: 0x43 and 0x44 are only read, so the
+// charger, the amplifier and every enabled output stay exactly as they were.
+struct Tab5PwrProbeIo {
+  i2c_master_dev_handle_t expander[2] = {nullptr, nullptr};
+
+  i2c_master_dev_handle_t device(uint8_t address) const {
+    if (address == kTab5PwrProbeExpanderA) return expander[0];
+    if (address == kTab5PwrProbeExpanderB) return expander[1];
+    return nullptr;
+  }
+  bool read(uint8_t address, uint8_t reg, uint8_t& value, uint32_t timeout_ms) {
+    i2c_master_dev_handle_t dev = device(address);
+    if (!dev) return false;
+    return i2c_master_transmit_receive(dev, &reg, 1, &value, 1, static_cast<int>(timeout_ms)) == ESP_OK;
+  }
+  uint64_t now_ms() const { return static_cast<uint64_t>(esp_timer_get_time() / 1000); }
+  void delay(uint32_t ms) { vTaskDelay(pdMS_TO_TICKS(ms) + 1); }
+  void print(const char* line) { std::printf("%s\n", line); }
+  // The pad's current state: the pull to restore, and the evidence that nobody
+  // has claimed it yet.
+  bool pin_state(int gpio, Tab5PwrProbePinConfig& state) {
+    gpio_io_config_t io = {};
+    if (gpio_get_io_config(static_cast<gpio_num_t>(gpio), &io) != ESP_OK) return false;
+    state.output = io.oe != 0;
+    state.pull_up = io.pu != 0;
+    state.pull_down = io.pd != 0;
+    state.input = io.ie != 0;
+    state.od = io.od != 0;
+    state.oe_inv = io.oe_inv != 0;
+    state.fun_sel = static_cast<uint8_t>(io.fun_sel);
+    return true;
+  }
+  // The only change this probe ever makes to a pad: its internal pull-up. No
+  // level, no direction, no IO_MUX function.
+  bool pin_pull_up(int gpio) {
+    return gpio_set_pull_mode(static_cast<gpio_num_t>(gpio), GPIO_PULLUP_ONLY) == ESP_OK;
+  }
+  void pin_restore(int gpio, const Tab5PwrProbePinConfig& state) {
+    const gpio_pull_mode_t pull = state.pull_up && state.pull_down ? GPIO_PULLUP_PULLDOWN
+                                   : state.pull_up            ? GPIO_PULLUP_ONLY
+                                   : state.pull_down          ? GPIO_PULLDOWN_ONLY
+                                                              : GPIO_FLOATING;
+    if (gpio_set_pull_mode(static_cast<gpio_num_t>(gpio), pull) != ESP_OK)
+      ESP_LOGW(TAG, "pwrprobe: pad %d kept a pull-up", gpio);
+  }
+  int pin_level(int gpio) { return gpio_get_level(static_cast<gpio_num_t>(gpio)); }
+};
+
+int run_tab5_pwr_probe(int argc, char** argv) {
+  const BoardConfig& board = board_config();
+  i2c_master_bus_handle_t bus = i2c::bus(board.i2c);
+  if (!bus) {
+    std::printf("@error pwrprobe: no I2C bus on this board\n");
+    return 1;
+  }
+  Tab5PwrProbeIo io;
+  const uint8_t addresses[2] = {kTab5PwrProbeExpanderA, kTab5PwrProbeExpanderB};
+  for (size_t i = 0; i < 2; ++i) {
+    i2c_device_config_t config = {};
+    config.device_address = addresses[i];
+    config.scl_speed_hz = board.i2c.hz;
+    // A handle of our own on the shared bus: the app's drivers keep theirs, and
+    // only reads follow.
+    if (i2c_master_bus_add_device(bus, &config, &io.expander[i]) != ESP_OK) io.expander[i] = nullptr;
+  }
+  std::string args;
+  for (int i = 1; i < argc; ++i) {
+    if (i > 1) args.push_back(' ');  // extra words reach the parser so they are refused, not dropped
+    args += argv[i];
+  }
+  Tab5PwrProbe<Tab5PwrProbeIo> probe(io);
+  const bool ran = probe.run(args);
+  for (i2c_master_dev_handle_t& dev : io.expander)
+    if (dev) i2c_master_bus_rm_device(dev);
+  return ran ? 0 : 1;
+}
+#endif
+
+// The Tab5 battery probe (panel_tab5.hpp): the INA226 the BSP README names, if it
+// is really there. Its only device handles are the two candidate addresses, and
+// its only writes are the chip's own calibration and config registers -- the
+// charger enable pins and the amplifier live on the two expander chips, which
+// this adapter cannot address at all.
+struct Tab5BattIo {
+  i2c_master_dev_handle_t chip[2] = {nullptr, nullptr};
+
+  i2c_master_dev_handle_t device(uint8_t address) const {
+    if (address == kTab5BattAddressA) return chip[0];
+    if (address == kTab5BattAddressB) return chip[1];
+    return nullptr;
+  }
+  // Big endian on the wire, as the INA226's register map is.
+  bool read16(uint8_t address, uint8_t reg, uint16_t& value, uint32_t timeout_ms) {
+    i2c_master_dev_handle_t dev = device(address);
+    if (!dev) return false;
+    uint8_t bytes[2] = {0, 0};
+    if (i2c_master_transmit_receive(dev, &reg, 1, bytes, 2, static_cast<int>(timeout_ms)) != ESP_OK) return false;
+    value = static_cast<uint16_t>((bytes[0] << 8) | bytes[1]);
+    return true;
+  }
+  bool write16(uint8_t address, uint8_t reg, uint16_t value, uint32_t timeout_ms) {
+    i2c_master_dev_handle_t dev = device(address);
+    if (!dev) return false;
+    const uint8_t bytes[3] = {reg, static_cast<uint8_t>(value >> 8), static_cast<uint8_t>(value & 0xff)};
+    return i2c_master_transmit(dev, bytes, sizeof(bytes), static_cast<int>(timeout_ms)) == ESP_OK;
+  }
+  void delay(uint32_t ms) { vTaskDelay(pdMS_TO_TICKS(ms) + 1); }
+  void print(const char* line) { std::printf("%s\n", line); }
+};
+
+int run_tab5_batt(int argc, char** argv) {
+  const BoardConfig& board = board_config();
+  i2c_master_bus_handle_t bus = i2c::bus(board.i2c);
+  if (!bus) {
+    std::printf("@error batt: no I2C bus on this board\n");
+    return 1;
+  }
+  Tab5BattIo io;
+  const uint8_t addresses[2] = {kTab5BattAddressA, kTab5BattAddressB};
+  for (size_t i = 0; i < 2; ++i) {
+    i2c_device_config_t config = {};
+    config.device_address = addresses[i];
+    config.scl_speed_hz = board.i2c.hz;
+    // A handle of our own on the shared bus: the codec keeps its own, and only
+    // reads go to an address that is not an INA226.
+    if (i2c_master_bus_add_device(bus, &config, &io.chip[i]) != ESP_OK) io.chip[i] = nullptr;
+  }
+  std::string args;
+  for (int i = 1; i < argc; ++i) {
+    if (i > 1) args.push_back(' ');  // extra words reach the parser so they are refused, not dropped
+    args += argv[i];
+  }
+  Tab5BatteryProbe<Tab5BattIo> probe(io);
+  const bool ran = probe.run(args);
+  for (i2c_master_dev_handle_t& dev : io.chip)
+    if (dev) i2c_master_bus_rm_device(dev);
+  return ran ? 0 : 1;
+}
+
 int run(int argc, char** argv) {
+#if CONFIG_HG_BOARD_M5STACK_TAB5
+  // This board only: a bounded, read-only register watch for the missing PWR
+  // input. It needs no app task, so it answers here before the queue below.
+  if (argc && std::strcmp(argv[0], "pwrprobe") == 0) return run_tab5_pwr_probe(argc, argv);
+  // And the battery question: is the INA226 the BSP README names on this bus?
+  // One shot, and the only writes are that chip's own config registers.
+  if (argc && std::strcmp(argv[0], "batt") == 0) return run_tab5_batt(argc, argv);
+#endif
   const bool is_diag = argc && std::strcmp(argv[0], "diag") == 0;
   // The log copy needs no app task: it answers even while that task is stuck.
   if (is_diag && argc == 2 && std::strcmp(argv[1], "log") == 0) {
@@ -45,6 +202,14 @@ int run(int argc, char** argv) {
   if (!posted) req->release();  // nobody will answer: drop the app task's share too
   if (posted && req->wait(3000)) {
     std::printf("%s\n", req->reply().c_str());
+#if CONFIG_HG_BOARD_M5STACK_TAB5
+    // `help` lists the app's commands; pwrprobe and batt answer in the port, so
+    // their lines are added here and only on this board.
+    if (argc == 1 && std::strcmp(argv[0], "help") == 0) {
+      std::printf("%s\n", kTab5PwrProbeCommandHelp);
+      std::printf("%s\n", kTab5BattCommandHelp);
+    }
+#endif
   } else if (is_diag && argc == 1) {
     // A stuck app task or a full event queue is what a hang report most needs to
     // show: the port answers for itself.
@@ -69,6 +234,20 @@ void begin() {
     cmd.func = &run;
     esp_console_cmd_register(&cmd);
   }
+#if CONFIG_HG_BOARD_M5STACK_TAB5
+  // Registered on the Tab5 build only: the probe reads this board's expanders and
+  // pads, and no other board has that hardware.
+  esp_console_cmd_t probe = {};
+  probe.command = "pwrprobe";
+  probe.help = "Tab5 only: watch both expanders' input/interrupt registers and a few free pads, 1..30 s, read-only";
+  probe.func = &run;
+  esp_console_cmd_register(&probe);
+  esp_console_cmd_t batt = {};
+  batt.command = "batt";
+  batt.help = "Tab5 only: probe 0x40/0x41 for the INA226 and read one triggered conversion (bus/shunt/current/power)";
+  batt.func = &run;
+  esp_console_cmd_register(&batt);
+#endif
   esp_console_repl_t* repl = nullptr;
   esp_console_repl_config_t repl_cfg = ESP_CONSOLE_REPL_CONFIG_DEFAULT();
   repl_cfg.prompt = "gadget>";

@@ -347,8 +347,9 @@ void App::power_tick() {
     const bool idle = !busy && !ringing && settled;
     // Something for the user wakes the screen. A connection still settling keeps a
     // lit screen lit, but leaves a dark one dark: Wi-Fi coming and going (a commute)
-    // must not turn the screen on and leave it on.
-    if (busy || (!settled && !display_sleeping_)) {
+    // must not turn the screen on and leave it on. The resting clock already owns
+    // the panel there, so this wake waits for an input instead of ending it.
+    if (busy || (!settled && !display_sleeping_ && !clock_showing_)) {
       wake_display();
     } else if (ringing) {
       if (display_sleeping_ || display_dimmed_) wake_display();
@@ -445,11 +446,13 @@ void App::leave_face_down() {
   log(LogLevel::Info, "face up: screen on");
 }
 
-// The clock rests only on an online, paired Ready screen that nothing else is
-// using: no turn, no overlay, no settings, no message waiting to be read.
+// The clock rests on any idle screen that nothing else is using -- Ready, and the
+// Offline, Connecting and Pairing screens of a link that is not up yet -- but never
+// during Boot, whose own screen covers the panel while the firmware starts: no turn,
+// no overlay, no settings, no message waiting to be read.
 bool App::clock_blocked() const {
   if (!clock_after_ms_ || !hal_.display || !wall_valid_) return true;
-  if (phase_ != Phase::Online || !paired_) return true;
+  if (phase_ == Phase::Boot) return true;
   if (screen_busy() || settings_open() || overlay_ != Overlay::None) return true;
   if (alarm_ || timer_active()) return true;
   if (!fatal_.empty() || !notice_.empty()) return true;

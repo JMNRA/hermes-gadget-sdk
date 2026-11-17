@@ -1,9 +1,12 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdio>
 #include <fstream>
+#include <iterator>
 #include <map>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -2582,4 +2585,921 @@ TEST("StopWatch: power-off silences the amplifier, then sends the PM1's shutdown
   CHECK_EQ(fake.ioe16(0x05) & kSwAmp, 0);
   CHECK_EQ(fake.pm1[0x0C], 0xA1);
   CHECK_EQ(fake.pm1_written.back(), 0x0C);
+}
+
+// --- Tab5 PWR probe (console `pwrprobe`) -----------------------------------
+//
+// The question the probe answers on the unit: can software see the PWR button
+// or any other hidden input at all? The BSP declares no buttons and no battery,
+// no PMIC answers on this board's bus, so the candidates are the input status of
+// the two PI4IOE5V6408 expanders and a few P4 pads the pinout does not name.
+// Everything here is the read-only half: parsing, formatting, change detection
+// and the pad rules. The ESP adapter only performs the reads this exposes.
+struct PwrProbeFake {
+  struct Regs {
+    uint8_t in = 0, irq = 0;
+    bool fail = false;
+  };
+  struct Pad {
+    bool present = true;
+    bool output = false, pu = false, pd = false, ie = true, od = false, oe_inv = false;
+    uint8_t fun_sel = 0;
+    int level = 0;
+  };
+  std::array<Regs, 2> regs{};  // 0 = 0x43, 1 = 0x44
+  std::map<int, Pad> pads;
+  std::vector<std::string> calls;  // every IO call, in order, as "kind:gpio" or "read:addr:reg"
+  std::vector<std::string> out;    // every printed line
+  uint64_t time = 0;
+  int writes = 0;  // the interface has no register write; kept at zero by construction
+  uint32_t io_ms = 0;
+
+  bool read(uint8_t addr, uint8_t reg, uint8_t& value, uint32_t timeout_ms) {
+    io_ms = timeout_ms;
+    calls.push_back("read:" + std::to_string(addr) + ":" + std::to_string(reg));
+    if (addr != 0x43 && addr != 0x44) return false;
+    const Regs& r = regs[addr == 0x43 ? 0 : 1];
+    if (r.fail) return false;
+    value = reg == 0x0f ? r.in : r.irq;
+    return true;
+  }
+  uint64_t now_ms() const { return time; }
+  void delay(uint32_t ms) { time += ms; }
+  void print(const char* line) { out.push_back(line); }
+  bool pin_state(int gpio, hgp::Tab5PwrProbePinConfig& state) {
+    calls.push_back("state:" + std::to_string(gpio));
+    const auto it = pads.find(gpio);
+    if (it == pads.end() || !it->second.present) return false;
+    const Pad& p = it->second;
+    state.output = p.output;
+    state.pull_up = p.pu;
+    state.pull_down = p.pd;
+    state.input = p.ie;
+    state.od = p.od;
+    state.oe_inv = p.oe_inv;
+    state.fun_sel = p.fun_sel;
+    return true;
+  }
+  bool pin_pull_up(int gpio) {
+    calls.push_back("pullup:" + std::to_string(gpio));
+    auto it = pads.find(gpio);
+    if (it == pads.end() || !it->second.present) return false;
+    it->second.pu = true;
+    return true;
+  }
+  void pin_restore(int gpio, const hgp::Tab5PwrProbePinConfig& state) {
+    calls.push_back("restore:" + std::to_string(gpio));
+    auto it = pads.find(gpio);
+    if (it == pads.end()) return;
+    // Only the pull is put back: the probe never changed direction, level or
+    // IO_MUX function on any pad.
+    it->second.pu = state.pull_up;
+    it->second.pd = state.pull_down;
+  }
+  int pin_level(int gpio) {
+    calls.push_back("level:" + std::to_string(gpio));
+    const auto it = pads.find(gpio);
+    return it == pads.end() ? -1 : it->second.level;
+  }
+  size_t count(const std::string& prefix) const {
+    size_t n = 0;
+    for (const auto& c : calls) n += c.rfind(prefix, 0) == 0 ? 1 : 0;
+    return n;
+  }
+};
+
+TEST("Tab5 pwrprobe: the window is 1..30 seconds, ten by default") {
+  const auto ok = [](std::string_view args) {
+    const auto r = hgp::tab5_pwr_probe_parse(args);
+    return r.ok ? int(r.seconds) : -1;
+  };
+  CHECK_EQ(ok(""), 10);
+  CHECK_EQ(ok("  "), 10);
+  CHECK_EQ(ok("1"), 1);
+  CHECK_EQ(ok("25"), 25);
+  CHECK_EQ(ok(" 30 "), 30);
+  CHECK_EQ(ok("007"), 7);
+  CHECK_EQ(ok("0"), -1);
+  CHECK_EQ(ok("31"), -1);
+  CHECK_EQ(ok("99999"), -1);
+  CHECK_EQ(ok("-1"), -1);
+  CHECK_EQ(ok("1.5"), -1);
+  CHECK_EQ(ok("ten"), -1);
+  CHECK_EQ(ok("0x10"), -1);
+  CHECK_EQ(ok("10 20"), -1);
+  CHECK_EQ(ok("10s"), -1);
+}
+
+TEST("Tab5 pwrprobe: an out-of-bounds window refuses before anything is read") {
+  struct Case {
+    const char* args;
+  };
+  const Case cases[] = {{""}, {"0"}, {"31"}, {"sixty"}};
+  for (const Case& c : cases) {
+    PwrProbeFake io;
+    io.pads[16] = PwrProbeFake::Pad{};
+    hgp::Tab5PwrProbe<PwrProbeFake> probe(io);
+    const bool ran = probe.run(c.args);
+    if (std::string_view(c.args).empty()) {
+      CHECK(ran);  // the empty argument is the default window, not a refusal
+      continue;
+    }
+    CHECK(!ran);
+    CHECK_EQ(io.out.size(), size_t{1});
+    CHECK_EQ(io.out.front(), std::string(hgp::kTab5PwrProbeUsage));
+    // No register read, no pad touched: the refusal costs the hardware nothing.
+    CHECK(io.calls.empty());
+    CHECK_EQ(io.writes, 0);
+  }
+}
+
+TEST("Tab5 pwrprobe: only 0x0f and 0x13 of the two expanders are ever read") {
+  PwrProbeFake io;
+  io.regs[0] = {0x1f, 0x00, false};
+  io.regs[1] = {0x00, 0x42, false};
+  io.pads[16] = PwrProbeFake::Pad{};
+  io.pads[17] = PwrProbeFake::Pad{};
+  io.pads[18] = PwrProbeFake::Pad{};
+  io.pads[21] = PwrProbeFake::Pad{};
+  hgp::Tab5PwrProbe<PwrProbeFake> probe(io);
+  CHECK(probe.run("1"));
+  CHECK_EQ(io.count("read:67:15") + io.count("read:67:19"), size_t{10});  // five ticks, two registers
+  CHECK_EQ(io.count("read:68:15") + io.count("read:68:19"), size_t{10});
+  CHECK_EQ(io.count("read:67:"), size_t{10});
+  CHECK_EQ(io.count("read:68:"), size_t{10});
+  CHECK_EQ(io.writes, 0);
+  for (const auto& call : io.calls) {
+    if (call.rfind("read:", 0) != 0) continue;
+    CHECK(call == "read:67:15" || call == "read:67:19" || call == "read:68:15" || call == "read:68:19");
+  }
+  CHECK_EQ(io.io_ms, 50u);  // one bounded I2C transaction, as the drivers use
+  // Every pad was restored to the state it was found in.
+  CHECK_EQ(io.count("restore:"), size_t{4});
+  CHECK(io.pads[16].pu == false && io.pads[16].ie == true);
+}
+
+TEST("Tab5 pwrprobe: one compact line per tick names both input registers and the pads") {
+  PwrProbeFake io;
+  io.regs[0] = {0x1f, 0x00, false};
+  io.regs[1] = {0x00, 0x00, false};
+  io.pads[16] = PwrProbeFake::Pad{};
+  io.pads[16].level = 1;
+  io.pads[17] = PwrProbeFake::Pad{};
+  io.pads[18] = PwrProbeFake::Pad{};
+  io.pads[21] = PwrProbeFake::Pad{};
+  io.pads[21].present = false;  // the adapter could not read the pad's state: left alone
+  hgp::Tab5PwrProbe<PwrProbeFake> probe(io);
+  CHECK(probe.run("1"));  // five ticks at 200 ms
+  CHECK_EQ(io.out.size(), size_t{7});  // header, five ticks, summary
+  CHECK_EQ(io.out.front(), std::string("pwrprobe: 1s; expanders 0x43 0x44 regs 0x0f/0x13; pads 16 17 18 (skipped 21)"));
+  CHECK_EQ(io.out[1], std::string("pwrprobe 0.0s 0x43 in=0x1f 0x44 in=0x00 pads 16=1 17=0 18=0 irq 0x43=0x00 0x44=0x00"));
+  CHECK_EQ(io.out[2], std::string("pwrprobe 0.2s 0x43 in=0x1f 0x44 in=0x00 pads 16=1 17=0 18=0"));
+  CHECK_EQ(io.out[5], std::string("pwrprobe 0.8s 0x43 in=0x1f 0x44 in=0x00 pads 16=1 17=0 18=0"));
+  CHECK_EQ(io.out.back(), std::string("pwrprobe summary: 5 ticks; changed 0x43 in=0x00 0x44 in=0x00 "
+                                       "0x43 irq=0x00 0x44 irq=0x00 pads=- (nothing changed)"));
+}
+
+TEST("Tab5 pwrprobe: the interrupt status appears on the tick it changes") {
+  PwrProbeFake io;
+  io.regs[0] = {0x00, 0x00, false};
+  io.regs[1] = {0x00, 0x00, false};
+  io.pads[16] = PwrProbeFake::Pad{};
+  // The default window keeps every pad; this pad list is what the header names.
+  io.pads[17] = PwrProbeFake::Pad{};
+  io.pads[18] = PwrProbeFake::Pad{};
+  io.pads[21] = PwrProbeFake::Pad{};
+  hgp::Tab5PwrProbe<PwrProbeFake> probe(io);
+  CHECK(probe.run("1"));
+  // Drive the tracker directly for the change case: the run above never changed.
+  hgp::Tab5PwrProbeTracker tracker;
+  hgp::Tab5PwrProbeSample s{};
+  char line[192];
+  s.in_ok[0] = s.in_ok[1] = s.irq_ok[0] = s.irq_ok[1] = true;
+  s.in[0] = 0x00;
+  s.in[1] = 0x00;
+  tracker.observe(s);
+  size_t n = hgp::tab5_pwr_probe_line(line, sizeof(line), s, tracker, 0);
+  CHECK_EQ(std::string(line, n), std::string("pwrprobe 0.0s 0x43 in=0x00 0x44 in=0x00 pads none irq 0x43=0x00 0x44=0x00"));
+  tracker.observe(s);
+  n = hgp::tab5_pwr_probe_line(line, sizeof(line), s, tracker, 200);
+  CHECK_EQ(std::string(line, n), std::string("pwrprobe 0.2s 0x43 in=0x00 0x44 in=0x00 pads none"));
+  s.irq[1] = 0x08;  // the 0x44 interrupt status changed: that tick carries it
+  tracker.observe(s);
+  n = hgp::tab5_pwr_probe_line(line, sizeof(line), s, tracker, 400);
+  CHECK_EQ(std::string(line, n),
+           std::string("pwrprobe 0.4s 0x43 in=0x00 0x44 in=0x00 pads none irq 0x43=0x00 0x44=0x08"));
+  CHECK_EQ(tracker.changed_irq(0x44), uint8_t{0x08});
+  CHECK_EQ(tracker.changed_irq(0x43), uint8_t{0x00});
+}
+
+TEST("Tab5 pwrprobe: the summary names the bits that changed during the window") {
+  hgp::Tab5PwrProbeTracker tracker;
+  hgp::Tab5PwrProbeSample s{};
+  s.in_ok[0] = s.in_ok[1] = s.irq_ok[0] = s.irq_ok[1] = true;
+  s.gpio_ok = 0x0f;
+  tracker.observe(s);
+  s.in[0] = 0x04;   // 0x43 input bit 2 rises
+  s.in[1] = 0x02;   // 0x44 input bit 1 rises
+  s.irq[1] = 0x40;  // and 0x44's interrupt status saw pin 6
+  s.gpio_high = 0x05;  // pads 16 and 18 go high
+  tracker.observe(s);
+  s.in[0] = 0x00;  // and 0x43 falls back: both edges count
+  s.gpio_high = 0x0f;  // then every pad: each edge counts, so all four changed
+  tracker.observe(s);
+  char line[192];
+  const size_t n = hgp::tab5_pwr_probe_summary(line, sizeof(line), tracker);
+  CHECK_EQ(std::string(line, n), std::string("pwrprobe summary: 3 ticks; changed 0x43 in=0x04 0x44 in=0x02 "
+                                             "0x43 irq=0x00 0x44 irq=0x40 pads=16,17,18,21"));
+  CHECK_EQ(tracker.changed_gpio(), uint8_t{0x0f});
+  // A register that never answered is reported as unreadable, never as zero.
+  hgp::Tab5PwrProbeTracker blind;
+  hgp::Tab5PwrProbeSample none{};
+  none.in_ok[0] = false;
+  none.in_ok[1] = true;
+  none.irq_ok[0] = false;
+  none.irq_ok[1] = true;
+  blind.observe(none);
+  const size_t m = hgp::tab5_pwr_probe_summary(line, sizeof(line), blind);
+  CHECK_EQ(std::string(line, m), std::string("pwrprobe summary: 1 ticks; changed 0x43 in=- 0x44 in=0x00 "
+                                             "0x43 irq=- 0x44 irq=0x00 pads=- (nothing changed)"));
+  std::array<char, 16> small{};
+  CHECK_EQ(hgp::tab5_pwr_probe_summary(small.data(), small.size(), tracker), size_t{0});
+}
+
+TEST("Tab5 pwrprobe: a pad already driven, pulled or mapped to a function is skipped") {
+  hgp::Tab5PwrProbePinConfig free_pad{};
+  free_pad.input = true;  // an enabled, undriven, unpulled pad in the default function
+  CHECK(hgp::tab5_pwr_probe_pin_free(free_pad));
+  free_pad.fun_sel = hgp::kTab5PwrProbeFuncGpio;  // PIN_FUNC_GPIO: also nobody's
+  CHECK(hgp::tab5_pwr_probe_pin_free(free_pad));
+  free_pad.fun_sel = 0;
+  hgp::Tab5PwrProbePinConfig no_input{};
+  CHECK(!hgp::tab5_pwr_probe_pin_free(no_input));  // its input buffer is off: unreadable
+  hgp::Tab5PwrProbePinConfig other_function{};
+  other_function.input = true;
+  other_function.fun_sel = 3;
+  CHECK(!hgp::tab5_pwr_probe_pin_free(other_function));
+  hgp::Tab5PwrProbePinConfig driven{};
+  driven.input = true;
+  driven.output = true;
+  CHECK(!hgp::tab5_pwr_probe_pin_free(driven));
+  hgp::Tab5PwrProbePinConfig pulled{};
+  pulled.input = true;
+  pulled.pull_up = true;
+  CHECK(!hgp::tab5_pwr_probe_pin_free(pulled));
+  hgp::Tab5PwrProbePinConfig pulled_down{};
+  pulled_down.input = true;
+  pulled_down.pull_down = true;
+  CHECK(!hgp::tab5_pwr_probe_pin_free(pulled_down));
+  hgp::Tab5PwrProbePinConfig mapped{};
+  mapped.input = true;
+  mapped.fun_sel = 2;  // an IO_MUX function that is not the default and not GPIO
+  CHECK(!hgp::tab5_pwr_probe_pin_free(mapped));
+  hgp::Tab5PwrProbePinConfig open_drain{};
+  open_drain.input = true;
+  open_drain.od = true;
+  CHECK(!hgp::tab5_pwr_probe_pin_free(open_drain));
+
+  PwrProbeFake io;
+  io.pads[16] = PwrProbeFake::Pad{};  // free
+  io.pads[17] = PwrProbeFake::Pad{};
+  io.pads[17].output = true;  // already an output: never touched
+  io.pads[18] = PwrProbeFake::Pad{};
+  io.pads[18].pu = true;  // claimed by a driver that pulled it up
+  io.pads[21] = PwrProbeFake::Pad{};
+  io.pads[21].fun_sel = 2;  // an IO_MUX function, not plain GPIO
+  hgp::Tab5PwrProbe<PwrProbeFake> probe(io);
+  CHECK(probe.run("1"));
+  CHECK_EQ(io.count("pullup:17") + io.count("pullup:18") + io.count("pullup:21"), size_t{0});
+  CHECK_EQ(io.count("pullup:16"), size_t{1});
+  CHECK_EQ(io.count("restore:17") + io.count("restore:18") + io.count("restore:21"), size_t{0});
+  CHECK_EQ(io.out.front(), std::string("pwrprobe: 1s; expanders 0x43 0x44 regs 0x0f/0x13; pads 16 (skipped 17 18 21)"));
+  CHECK_EQ(io.out[1], std::string("pwrprobe 0.0s 0x43 in=0x00 0x44 in=0x00 pads 16=0 irq 0x43=0x00 0x44=0x00"));
+}
+
+TEST("Tab5 pwrprobe: every configured pad is restored, even when the expanders fail") {
+  PwrProbeFake io;
+  io.regs[0].fail = true;
+  io.regs[1].fail = true;
+  io.pads[16] = PwrProbeFake::Pad{};
+  io.pads[17] = PwrProbeFake::Pad{};
+  io.pads[17].ie = false;  // input buffer off: skipped, never given a pull-up
+  io.pads[18] = PwrProbeFake::Pad{};
+  io.pads[21] = PwrProbeFake::Pad{};
+  hgp::Tab5PwrProbe<PwrProbeFake> probe(io);
+  CHECK(probe.run("1"));
+  CHECK_EQ(io.count("pullup:17"), size_t{0});
+  CHECK_EQ(io.count("restore:"), size_t{3});
+  CHECK_EQ(io.pads[16].pu, false);  // its pull-up is gone again
+  CHECK_EQ(io.pads[16].ie, true);
+  CHECK_EQ(io.pads[18].pu, false);
+  CHECK_EQ(io.pads[21].pu, false);
+  // Unreadable registers print as unknown rather than as a level.
+  CHECK_EQ(io.out.front(), std::string("pwrprobe: 1s; expanders 0x43 0x44 regs 0x0f/0x13; pads 16 18 21 (skipped 17)"));
+  CHECK_EQ(io.out[1], std::string("pwrprobe 0.0s 0x43 in=- 0x44 in=- pads 16=0 18=0 21=0 irq 0x43=- 0x44=-"));
+  CHECK_EQ(io.out.back(), std::string("pwrprobe summary: 5 ticks; changed 0x43 in=- 0x44 in=- "
+                                      "0x43 irq=- 0x44 irq=- pads=- (nothing changed)"));
+}
+
+TEST("Tab5 pwrprobe: one window per instance, and a second call touches nothing") {
+  PwrProbeFake io;
+  io.pads[16] = PwrProbeFake::Pad{};
+  hgp::Tab5PwrProbe<PwrProbeFake> probe(io);
+  CHECK(probe.run("1"));
+  const auto calls = io.calls;
+  const auto out = io.out;
+  CHECK(!probe.run("1"));
+  CHECK(io.calls == calls && io.out == out);
+}
+
+TEST("Tab5 pwrprobe: the console wiring has no path that writes to a chip or a pad") {
+  const std::string source = __FILE__;
+  const std::string here = source.substr(0, source.find_last_of("/\\") + 1);
+  const std::string candidates[] = {
+      here + "../esp32/main/port_console.cpp",
+      "../../firmware/esp32/main/port_console.cpp",
+  };
+  std::ifstream file;
+  std::string text;
+  for (const auto& path : candidates) {
+    file.open(path);
+    if (file) break;
+    file.clear();
+  }
+  CHECK(file.is_open());
+  if (!file.is_open()) return;
+  text.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+  // The probe is wired here: the command, the controller that pins which
+  // registers are read (0x0f/0x13 only) and a plain I2C read must all appear, so
+  // this test cannot pass while the wiring is missing.
+  CHECK(text.find("\"pwrprobe\"") != std::string::npos);
+  CHECK(text.find("Tab5PwrProbe<") != std::string::npos);
+  CHECK(text.find("i2c_master_transmit_receive") != std::string::npos);
+  // The probe's own adapter, and the command that runs it, hold no register
+  // write at all: its region runs from the IO struct to the battery probe below
+  // it, which is where a write lives on this board (its own tests pin it).
+  const size_t probe_at = text.find("struct Tab5PwrProbeIo");
+  const size_t battery_at = text.find("struct Tab5BattIo");
+  CHECK(probe_at != std::string::npos && battery_at != std::string::npos && probe_at < battery_at);
+  if (probe_at != std::string::npos && battery_at > probe_at) {
+    const std::string probe = text.substr(probe_at, battery_at - probe_at);
+    CHECK(probe.find("i2c_master_transmit(") == std::string::npos);
+    CHECK(probe.find("gpio_set_level") == std::string::npos);
+    CHECK(probe.find("gpio_set_direction") == std::string::npos);
+    CHECK(probe.find("esp_io_expander") == std::string::npos);
+  }
+  // And nothing in this file can drive a pad or reset a device.
+  CHECK(text.find("gpio_set_level") == std::string::npos);
+  CHECK(text.find("gpio_set_direction") == std::string::npos);
+  CHECK(text.find("GPIO_MODE_OUTPUT") == std::string::npos);
+  CHECK(text.find("i2c_master_bus_reset") == std::string::npos);
+  CHECK(text.find("esp_io_expander") == std::string::npos);
+}
+
+TEST("Tab5 pwrprobe: the window lasts the seconds asked for and no longer") {
+  PwrProbeFake io;
+  io.pads[16] = PwrProbeFake::Pad{};
+  io.pads[17] = PwrProbeFake::Pad{};
+  io.pads[18] = PwrProbeFake::Pad{};
+  io.pads[21] = PwrProbeFake::Pad{};
+  hgp::Tab5PwrProbe<PwrProbeFake> probe(io);
+  CHECK(probe.run("7"));
+  // One tick every 200 ms for seven seconds: the last one lands on 6.8 s.
+  CHECK_EQ(io.out.size(), size_t{2 + 35});  // header, 35 ticks, summary
+  CHECK_EQ(io.out[1].rfind("pwrprobe 0.0s ", 0), size_t{0});
+  CHECK_EQ(io.out[34].rfind("pwrprobe 6.6s ", 0), size_t{0});
+  CHECK_EQ(io.out.back().rfind("pwrprobe summary: 35 ticks;", 0), size_t{0});
+  CHECK(io.time >= 6800 && io.time < 7000);  // the delay that would pass the window is not taken
+}
+
+// --- Tab5 battery probe (console `batt`) ------------------------------------
+//
+// The Tab5 BSP README names an IP2326 charge/discharge controller with an INA226
+// monitor and a removable NP-F550 cell, but this repo has no INA226 driver: the
+// BSP declares BSP_CAPS_BAT 0 and this unit's `diag` I2C scan finds 0x40 and
+// 0x41, where the ES7210 microphones live and where 0x40 is also the INA226's
+// default address. So `batt` asks the chip itself: manufacturer id (0xfe, 0x5449
+// for TI) and die id (0xff, 0x2260 for the INA226) decide it before anything is
+// written, and only the chip that answers gets its own calibration and config
+// written -- never an expander, never a charger pin. One shot, no polling.
+struct BattFake {
+  std::map<uint32_t, uint16_t> regs;  // address << 8 | register
+  std::map<uint32_t, int> fail;       // non-zero: this access fails
+  std::vector<std::string> calls;     // every IO call in order
+  std::vector<std::string> out;       // every printed line
+  std::vector<uint32_t> delays;
+  uint32_t io_ms = 0;
+
+  static uint32_t key(uint8_t address, uint8_t reg) { return (static_cast<uint32_t>(address) << 8) | reg; }
+  static std::string tag(const char* kind, uint8_t address, uint8_t reg) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%s:0x%02x:0x%02x", kind, unsigned(address), unsigned(reg));
+    return buf;
+  }
+  bool read16(uint8_t address, uint8_t reg, uint16_t& value, uint32_t timeout_ms) {
+    io_ms = timeout_ms;
+    calls.push_back(tag("read", address, reg));
+    const auto bad = fail.find(key(address, reg));
+    if (bad != fail.end() && bad->second) return false;
+    const auto it = regs.find(key(address, reg));
+    if (it == regs.end()) return false;
+    value = it->second;
+    return true;
+  }
+  bool write16(uint8_t address, uint8_t reg, uint16_t value, uint32_t timeout_ms) {
+    io_ms = timeout_ms;
+    char buf[48];
+    std::snprintf(buf, sizeof(buf), "write:0x%02x:0x%02x=0x%04x", unsigned(address), unsigned(reg), unsigned(value));
+    calls.push_back(buf);
+    const auto bad = fail.find(key(address, reg));
+    if (bad != fail.end() && bad->second) return false;
+    regs[key(address, reg)] = value;
+    return true;
+  }
+  void delay(uint32_t ms) { delays.push_back(ms); }
+  void print(const char* line) { out.push_back(line); }
+  size_t count(const std::string& prefix) const {
+    size_t n = 0;
+    for (const auto& c : calls) n += c.rfind(prefix, 0) == 0 ? 1 : 0;
+    return n;
+  }
+};
+
+// An INA226 answers its two identity registers and nothing else yet.
+void batt_ina226(BattFake& io, uint8_t address) {
+  io.regs[BattFake::key(address, hgp::kTab5InaRegManufacturer)] = hgp::kTab5InaManufacturerTi;
+  io.regs[BattFake::key(address, hgp::kTab5InaRegDie)] = hgp::kTab5InaDieId;
+}
+
+TEST("Tab5 batt: only the TI manufacturer id and the INA226 die id name the chip") {
+  CHECK(hgp::tab5_ina_verdict(false, 0x5449, 0x2260) == hgp::Tab5InaVerdict::NoAnswer);
+  CHECK(hgp::tab5_ina_verdict(true, 0x5449, 0x2260) == hgp::Tab5InaVerdict::Ina226);
+  CHECK(hgp::tab5_ina_verdict(true, 0x5449, 0x2261) == hgp::Tab5InaVerdict::NotIna226);  // TI, another die
+  CHECK(hgp::tab5_ina_verdict(true, 0x0000, 0x0000) == hgp::Tab5InaVerdict::NotIna226);  // a codec's registers
+  CHECK(hgp::tab5_ina_verdict(true, 0x2260, 0x5449) == hgp::Tab5InaVerdict::NotIna226);  // swapped: not an id pair
+  CHECK_EQ(hgp::kTab5InaManufacturerTi, uint16_t{0x5449});
+  CHECK_EQ(hgp::kTab5InaDieId, uint16_t{0x2260});
+  CHECK_EQ(hgp::kTab5BattDefaultShuntMilliohm, 20u);
+}
+
+TEST("Tab5 batt: the shunt is 1..1000 milliohm, twenty when the line names none") {
+  const auto shunt = [](std::string_view args) {
+    const auto r = hgp::tab5_batt_parse(args);
+    return r.ok ? int(r.shunt_milliohm) : -1;
+  };
+  CHECK_EQ(shunt(""), 20);
+  CHECK_EQ(shunt("  "), 20);
+  CHECK_EQ(shunt("1"), 1);
+  CHECK_EQ(shunt("20"), 20);
+  CHECK_EQ(shunt(" 100 "), 100);
+  CHECK_EQ(shunt("010"), 10);
+  CHECK_EQ(shunt("1000"), 1000);
+  CHECK_EQ(shunt("0"), -1);
+  CHECK_EQ(shunt("1001"), -1);
+  CHECK_EQ(shunt("20m"), -1);
+  CHECK_EQ(shunt("0x10"), -1);
+  CHECK_EQ(shunt("20 30"), -1);
+  CHECK_EQ(shunt("twenty"), -1);
+  CHECK_EQ(shunt("-20"), -1);
+}
+
+TEST("Tab5 batt: a bad argument refuses before anything is read or written") {
+  BattFake io;
+  hgp::Tab5BatteryProbe<BattFake> probe(io);
+  CHECK(!probe.run("0"));
+  CHECK_EQ(io.out.size(), size_t{1});
+  CHECK_EQ(io.out.front(), std::string(hgp::kTab5BattUsage));
+  CHECK(io.calls.empty());
+  CHECK(io.delays.empty());
+  // One attempt per instance, like the PWR probe: a second call changes nothing.
+  BattFake second;
+  hgp::Tab5BatteryProbe<BattFake> once(second);
+  batt_ina226(second, 0x40);
+  CHECK(once.run(""));
+  const auto calls = second.calls;
+  const auto out = second.out;
+  CHECK(!once.run(""));
+  CHECK(second.calls == calls && second.out == out);
+}
+
+TEST("Tab5 batt: with no INA226 it says so and lists what each address answered") {
+  BattFake io;
+  // 0x40 answers registers, but not as a TI device.
+  io.regs[BattFake::key(0x40, hgp::kTab5InaRegManufacturer)] = 0x0000;
+  io.regs[BattFake::key(0x40, hgp::kTab5InaRegDie)] = 0x0000;
+  // 0x41 does not answer at all.
+  io.fail[BattFake::key(0x41, hgp::kTab5InaRegManufacturer)] = 1;
+  hgp::Tab5BatteryProbe<BattFake> probe(io);
+  CHECK(probe.run(""));
+  CHECK_EQ(io.out.size(), size_t{4});
+  CHECK_EQ(io.out[0], std::string("batt: probing 0x40 0x41 for INA226 (mfr 0xfe=0x5449, die 0xff=0x2260); shunt 20 mOhm"));
+  CHECK_EQ(io.out[1], std::string("batt: 0x40 mfr=0x0000 die=0x0000: not an INA226"));
+  CHECK_EQ(io.out[2], std::string("batt: 0x41 no answer"));
+  CHECK_EQ(io.out[3], std::string("batt: no INA226 here: neither 0x40 nor 0x41 answered as one"));
+  // A silent address is asked once and left alone; the other only for its two ids.
+  const std::vector<std::string> expected = {"read:0x40:0xfe", "read:0x40:0xff", "read:0x41:0xfe"};
+  CHECK(io.calls == expected);
+  CHECK_EQ(io.count("write:"), size_t{0});  // no config, no calibration, no expander
+  CHECK(io.delays.empty());
+  CHECK_EQ(io.io_ms, 50u);  // one bounded I2C transaction, as the drivers use
+}
+
+TEST("Tab5 batt: the chip that identifies itself gets one triggered conversion") {
+  BattFake io;
+  batt_ina226(io, 0x41);
+  io.regs[BattFake::key(0x41, hgp::kTab5InaRegShunt)] = static_cast<uint16_t>(-5);    // -12.5 uV
+  io.regs[BattFake::key(0x41, hgp::kTab5InaRegBus)] = 5990;                           // 7487.5 mV
+  io.regs[BattFake::key(0x41, hgp::kTab5InaRegCurrent)] = static_cast<uint16_t>(-5);  // -0.625 mA at 20 mOhm
+  io.regs[BattFake::key(0x41, hgp::kTab5InaRegPower)] = 1498;                         // 4.681 W
+  hgp::Tab5BatteryProbe<BattFake> probe(io);
+  CHECK(probe.run(""));
+  CHECK_EQ(io.out.size(), size_t{6});
+  CHECK_EQ(io.out[1], std::string("batt: 0x40 no answer"));
+  CHECK_EQ(io.out[2], std::string("batt: 0x41 mfr=0x5449 die=0x2260: INA226"));
+  CHECK_EQ(io.out[3],
+           std::string("batt: 0x41 config 0x0003 (shunt+bus, one triggered conversion), cal 2048 (current lsb 0.125 mA)"));
+  CHECK_EQ(io.out[4], std::string("batt: 0x41 bus 7488 mV | shunt -12.5 uV | current -0.6 mA (discharge) | power 4681 mW"));
+  CHECK_EQ(io.out[5], std::string("batt: + charges the cell, - discharges it; a percentage here would be an estimate "
+                                  "from bus voltage, not a fuel gauge"));
+  // The whole transcript: ids, then calibration, then the config that starts the
+  // one conversion, then the four result registers once each. No polling.
+  const std::vector<std::string> expected = {"read:0x40:0xfe",  "read:0x41:0xfe",  "read:0x41:0xff",
+                                             "write:0x41:0x05=0x0800", "write:0x41:0x00=0x0003",
+                                             "read:0x41:0x02", "read:0x41:0x01",  "read:0x41:0x04",
+                                             "read:0x41:0x03"};
+  CHECK(io.calls == expected);
+  CHECK_EQ(io.delays.size(), size_t{1});
+  CHECK_EQ(io.delays[0], hgp::kTab5InaConversionWaitMs);
+  // 0x40 was only asked who it is: nothing was written to it.
+  CHECK_EQ(io.count("write:0x40"), size_t{0});
+}
+
+TEST("Tab5 batt: the registers convert with the documented LSBs, and the sign names charge or discharge") {
+  char line[192];
+  hgp::Tab5InaReading r{};
+  r.shunt_raw = 5;
+  r.bus_raw = 5990;
+  r.current_raw = 1000;
+  r.power_raw = 2996;
+  size_t n = hgp::tab5_batt_reading(line, sizeof(line), 0x40, r, 20);
+  CHECK_EQ(std::string(line, n),
+           std::string("batt: 0x40 bus 7488 mV | shunt 12.5 uV | current 125.0 mA (charge) | power 9363 mW"));
+  // A negative current register is a discharge; the power register is unsigned.
+  r.current_raw = -1000;
+  n = hgp::tab5_batt_reading(line, sizeof(line), 0x41, r, 20);
+  CHECK_EQ(std::string(line, n),
+           std::string("batt: 0x41 bus 7488 mV | shunt 12.5 uV | current -125.0 mA (discharge) | power 9363 mW"));
+  r.current_raw = 0;
+  n = hgp::tab5_batt_reading(line, sizeof(line), 0x40, r, 20);
+  CHECK_EQ(std::string(line, n),
+           std::string("batt: 0x40 bus 7488 mV | shunt 12.5 uV | current 0.0 mA (idle) | power 9363 mW"));
+  // Voltage does not depend on the shunt; current and power scale with it inversely.
+  r.shunt_raw = -1;
+  r.bus_raw = 1;
+  r.current_raw = 1000;
+  r.power_raw = 8;
+  n = hgp::tab5_batt_reading(line, sizeof(line), 0x40, r, 10);
+  CHECK_EQ(std::string(line, n),
+           std::string("batt: 0x40 bus 1 mV | shunt -2.5 uV | current 250.0 mA (charge) | power 50 mW"));
+  // The smallest and largest the registers can hold, at the default shunt.
+  r.shunt_raw = 32767;
+  r.bus_raw = 65535;
+  r.current_raw = 32767;
+  r.power_raw = 65535;
+  n = hgp::tab5_batt_reading(line, sizeof(line), 0x40, r, 20);
+  CHECK_EQ(std::string(line, n),
+           std::string("batt: 0x40 bus 81919 mV | shunt 81917.5 uV | current 4095.9 mA (charge) | power 204797 mW"));
+  r.shunt_raw = -32768;
+  r.current_raw = -32768;
+  n = hgp::tab5_batt_reading(line, sizeof(line), 0x40, r, 20);
+  CHECK_EQ(std::string(line, n).rfind("batt: 0x40 bus 81919 mV | shunt -81920.0 uV | current -4096.0 mA (discharge)", 0),
+           size_t{0});
+  // A line that does not fit is dropped, never truncated into a wrong reading.
+  std::array<char, 16> small{};
+  CHECK_EQ(hgp::tab5_batt_reading(small.data(), small.size(), 0x40, r, 20), size_t{0});
+}
+
+TEST("Tab5 batt: a refused write or a failed read reports no reading, never a guess") {
+  BattFake no_cal;
+  batt_ina226(no_cal, 0x40);
+  no_cal.fail[BattFake::key(0x40, hgp::kTab5InaRegCalibration)] = 1;
+  hgp::Tab5BatteryProbe<BattFake> probe(no_cal);
+  CHECK(probe.run(""));
+  CHECK_EQ(no_cal.out.back(), std::string("batt: 0x40 write of reg 0x05 failed: no reading"));
+  CHECK_EQ(no_cal.count("write:"), size_t{1});  // the config that would start a conversion never follows
+  CHECK(no_cal.delays.empty());
+  CHECK_EQ(no_cal.count("read:0x40:0x02"), size_t{0});
+
+  BattFake no_current;
+  batt_ina226(no_current, 0x40);
+  // The two registers before it read fine; only the current register refuses.
+  no_current.regs[BattFake::key(0x40, hgp::kTab5InaRegBus)] = 5990;
+  no_current.regs[BattFake::key(0x40, hgp::kTab5InaRegShunt)] = 5;
+  no_current.fail[BattFake::key(0x40, hgp::kTab5InaRegCurrent)] = 1;
+  hgp::Tab5BatteryProbe<BattFake> failed_read(no_current);
+  CHECK(failed_read.run(""));
+  CHECK_EQ(no_current.out.back(), std::string("batt: 0x40 read of reg 0x04 failed: no reading"));
+  // A reading with one register missing is never printed as if it were whole.
+  CHECK_EQ(no_current.out.size(), size_t{5});  // header, two candidates, the setup, the failure
+}
+
+TEST("Tab5 batt: the console wiring can only reach the two INA226 candidates") {
+  const std::string source = __FILE__;
+  const std::string here = source.substr(0, source.find_last_of("/\\") + 1);
+  const std::string candidates[] = {
+      here + "../esp32/main/port_console.cpp",
+      "../../firmware/esp32/main/port_console.cpp",
+  };
+  std::ifstream file;
+  std::string text;
+  for (const auto& path : candidates) {
+    file.open(path);
+    if (file) break;
+    file.clear();
+  }
+  CHECK(file.is_open());
+  if (!file.is_open()) return;
+  text.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+  // The command, the controller and the plain I2C read must all be wired, so this
+  // test cannot pass while the command is missing.
+  CHECK(text.find("\"batt\"") != std::string::npos);
+  CHECK(text.find("Tab5BatteryProbe<") != std::string::npos);
+  CHECK(text.find("Tab5PwrProbe<") != std::string::npos);  // the PWR probe stays wired too
+  CHECK(text.find("i2c_master_transmit_receive") != std::string::npos);
+  // The battery adapter holds no expander address and no GPIO: the charger enable
+  // pins and the amplifier live there, and nothing here can reach them.
+  const size_t adapter_at = text.find("struct Tab5BattIo");
+  const size_t dispatch_at = text.find("int run(");
+  CHECK(adapter_at != std::string::npos && dispatch_at != std::string::npos && adapter_at < dispatch_at);
+  if (adapter_at != std::string::npos && dispatch_at > adapter_at) {
+    const std::string adapter = text.substr(adapter_at, dispatch_at - adapter_at);
+    CHECK(adapter.find("0x43") == std::string::npos);
+    CHECK(adapter.find("0x44") == std::string::npos);
+    CHECK(adapter.find("gpio_") == std::string::npos);
+  }
+  // Every write on this board goes through one three-byte helper, and the file
+  // drives no pad and resets nothing.
+  CHECK(text.find("gpio_set_level") == std::string::npos);
+  CHECK(text.find("gpio_set_direction") == std::string::npos);
+  CHECK(text.find("i2c_master_bus_reset") == std::string::npos);
+}
+
+// --- Tab5 battery indicator (hal.power from the INA226) --------------------
+//
+// Measured on this unit with an NP-F970 pack fitted: the INA226 at 0x41 reads
+// 8330 mV on USB (2S Li-ion: 7.2 V nominal, 8.4 V full) and 1213 mV with the
+// pack disconnected. The shunt current read about 0.1 mA, far too little to tell
+// a charge from a discharge, so the port reports the bus voltage, a presence flag
+// and a percentage from that voltage, and leaves `charging` and `external_power`
+// unknown. Everything below is the pure half; the ESP adapter only performs the
+// two-byte transfers these tests fake.
+struct Tab5PowerFake {
+  struct Chip {
+    bool present = false;  // the address answers a transfer at all
+    uint16_t mfr = 0;
+    uint16_t die = 0;
+    uint16_t bus = 0;
+  };
+  std::array<Chip, 2> chips{};  // 0 = 0x40, 1 = 0x41
+  bool fail_reads = false;
+  bool fail_writes = false;
+  std::vector<std::string> calls;  // every IO call, in order
+  std::vector<std::string> logs;   // every line the port logged
+  uint32_t read_timeout = 0;
+  uint32_t write_timeout = 0;
+  uint32_t waited_ms = 0;
+
+  size_t index(uint8_t address) const { return address == hgp::kTab5BattAddressB ? 1u : 0u; }
+  bool read16(uint8_t address, uint8_t reg, uint16_t& value, uint32_t timeout_ms) {
+    read_timeout = timeout_ms;
+    char call[32];
+    std::snprintf(call, sizeof(call), "read:%02x:%02x", unsigned(address), unsigned(reg));
+    calls.push_back(call);
+    if (fail_reads || (address != hgp::kTab5BattAddressA && address != hgp::kTab5BattAddressB)) return false;
+    Chip& chip = chips[index(address)];
+    if (!chip.present) return false;
+    if (reg == hgp::kTab5InaRegManufacturer) value = chip.mfr;
+    else if (reg == hgp::kTab5InaRegDie) value = chip.die;
+    else if (reg == hgp::kTab5InaRegBus) value = chip.bus;
+    else return false;  // a register the port must never ask for
+    return true;
+  }
+  bool write16(uint8_t address, uint8_t reg, uint16_t value, uint32_t timeout_ms) {
+    write_timeout = timeout_ms;
+    char call[40];
+    std::snprintf(call, sizeof(call), "write:%02x:%02x:%04x", unsigned(address), unsigned(reg), unsigned(value));
+    calls.push_back(call);
+    if (fail_writes || (address != hgp::kTab5BattAddressA && address != hgp::kTab5BattAddressB)) return false;
+    Chip& chip = chips[index(address)];
+    if (!chip.present) return false;
+    return reg == hgp::kTab5InaRegConfig;  // the triggered conversion is the only register written
+  }
+  void delay(uint32_t ms) {
+    waited_ms += ms;
+    calls.push_back("delay");
+  }
+  void print(const char* line) { logs.push_back(line); }
+};
+
+// The chip this unit has: 0x40 is the ES7210's own address and answers with its
+// own ids, 0x41 is the INA226.
+Tab5PowerFake tab5_unit() {
+  Tab5PowerFake fake;
+  fake.chips[0].present = true;
+  fake.chips[0].mfr = 0x4000;
+  fake.chips[0].die = 0x7210;
+  fake.chips[1].present = true;
+  fake.chips[1].mfr = hgp::kTab5InaManufacturerTi;
+  fake.chips[1].die = hgp::kTab5InaDieId;
+  fake.chips[1].bus = 6664;  // 8330 mV, the reading on USB with the pack fitted
+  return fake;
+}
+
+TEST("Tab5 battery: the bus register converts at 1.25 mV per LSB without wrapping") {
+  CHECK_EQ(hgp::tab5_ina_bus_mv(0), uint16_t(0));
+  CHECK_EQ(hgp::tab5_ina_bus_mv(1), uint16_t(1));     // 1.25 mV
+  CHECK_EQ(hgp::tab5_ina_bus_mv(2), uint16_t(3));     // 2.50 mV, rounded
+  CHECK_EQ(hgp::tab5_ina_bus_mv(3), uint16_t(4));     // 3.75 mV
+  CHECK_EQ(hgp::tab5_ina_bus_mv(4), uint16_t(5));     // 5.00 mV
+  CHECK_EQ(hgp::tab5_ina_bus_mv(6664), uint16_t(8330));  // the measured pack reading
+  CHECK_EQ(hgp::tab5_ina_bus_mv(6667), uint16_t(8334));  // 8.33375 V
+  // A register at full scale is 81.9 V, which a uint16_t millivolt field cannot
+  // hold: it saturates instead of wrapping to a small voltage.
+  CHECK_EQ(hgp::tab5_ina_bus_mv(65535), uint16_t(65535));
+}
+
+TEST("Tab5 battery: the 2S curve turns the pack voltage into a clamped percent") {
+  // 8.4 V full to 6.4 V empty, the resting voltage of two 4.2/3.2 V cells.
+  CHECK_EQ(hgp::tab5_pack_percent(8400), uint8_t(100));
+  CHECK_EQ(hgp::tab5_pack_percent(9000), uint8_t(100));  // above full: clamped
+  CHECK_EQ(hgp::tab5_pack_percent(8200), uint8_t(90));
+  CHECK_EQ(hgp::tab5_pack_percent(8000), uint8_t(80));
+  CHECK_EQ(hgp::tab5_pack_percent(7860), uint8_t(70));
+  CHECK_EQ(hgp::tab5_pack_percent(8300), uint8_t(95));  // between two points
+  CHECK_EQ(hgp::tab5_pack_percent(7600), uint8_t(50));
+  CHECK_EQ(hgp::tab5_pack_percent(7300), uint8_t(20));
+  CHECK_EQ(hgp::tab5_pack_percent(6600), uint8_t(5));
+  CHECK_EQ(hgp::tab5_pack_percent(6400), uint8_t(0));
+  CHECK_EQ(hgp::tab5_pack_percent(6000), uint8_t(0));  // below empty: clamped
+  CHECK_EQ(hgp::tab5_pack_percent(1213), uint8_t(0));  // the disconnected reading: never negative
+  // The reading the unit measured on USB with the pack fitted: 8.33 V.
+  CHECK_EQ(hgp::tab5_pack_percent(8330), uint8_t(97));
+}
+
+TEST("Tab5 battery: only a voltage no empty pack reaches counts as a fitted pack") {
+  // 1213 mV is the pack terminal with the cells removed, well below a protected
+  // 2S pack's 5.4-5.5 V cutoff, so the floor is 5.0 V.
+  CHECK(!hgp::tab5_pack_present(1213));
+  CHECK(!hgp::tab5_pack_present(0));
+  CHECK(hgp::tab5_pack_present(5000));
+  CHECK(hgp::tab5_pack_present(6400));
+  CHECK(hgp::tab5_pack_present(8330));
+}
+
+TEST("Tab5 battery: a poll is one triggered conversion with short timeouts") {
+  Tab5PowerFake fake = tab5_unit();
+  hgp::Tab5PowerReader<Tab5PowerFake> reader(fake);
+  CHECK(reader.begin());
+  fake.calls.clear();
+  const auto status = reader.read();
+  CHECK(status.has_value());
+  // Exactly three IO calls: start one conversion, wait once, read the bus
+  // register once. No polling, no calibration write, no current or power read.
+  CHECK_EQ(fake.calls.size(), size_t(3));
+  if (fake.calls.size() == 3) {
+    CHECK_EQ(fake.calls[0], std::string("write:41:00:0003"));  // shunt+bus, triggered
+    CHECK_EQ(fake.calls[1], std::string("delay"));
+    CHECK_EQ(fake.calls[2], std::string("read:41:02"));  // the bus voltage register
+  }
+  CHECK_EQ(fake.waited_ms, hgp::kTab5InaConversionWaitMs);
+  CHECK_EQ(fake.read_timeout, hgp::kTab5PowerIoMs);
+  CHECK_EQ(fake.write_timeout, hgp::kTab5PowerIoMs);
+  CHECK(hgp::kTab5PowerIoMs < hgp::kTab5BattIoMs);  // the poll's own, shorter timeout
+}
+
+TEST("Tab5 battery: a reading carries presence, millivolts and a voltage percent, not a charge state") {
+  Tab5PowerFake fake = tab5_unit();
+  hgp::Tab5PowerReader<Tab5PowerFake> reader(fake);
+  CHECK(reader.begin());
+  const auto reading = reader.read();
+  CHECK(reading.has_value());
+  if (!reading) return;
+  CHECK_EQ(reading->mv, uint16_t(8330));
+  CHECK_EQ(reading->present, true);
+  CHECK_EQ(*reading->percent, uint8_t(97));
+  // The shunt current (~0.1 mA here) cannot tell a charge from a discharge, so
+  // the reading has no charge or USB field at all: the port leaves both unknown.
+
+  // The disconnected pack: reported as measured, not as present.
+  fake.chips[1].bus = 970;  // 1213 mV
+  const auto absent = reader.read();
+  CHECK(absent.has_value());
+  if (!absent) return;
+  CHECK_EQ(absent->mv, uint16_t(1213));
+  CHECK_EQ(absent->present, false);
+  CHECK(!absent->percent.has_value());  // no percentage for a terminal with no cells
+}
+
+TEST("Tab5 battery: a failed read returns nothing and never repeats the previous value") {
+  Tab5PowerFake fake = tab5_unit();
+  hgp::Tab5PowerReader<Tab5PowerFake> reader(fake);
+  CHECK(reader.begin());
+  const auto first = reader.read();
+  CHECK(first.has_value() && first->mv == uint16_t(8330));
+
+  fake.fail_reads = true;
+  const auto failed = reader.read();
+  CHECK(!failed.has_value());  // nullopt, not 8330 again
+  fake.fail_reads = false;
+
+  fake.fail_writes = true;
+  const auto no_start = reader.read();
+  CHECK(!no_start.has_value());  // the conversion could not be started: no reading
+  fake.fail_writes = false;
+
+  // The next good reading is a new value, and the same value comes back only
+  // because the chip answered, never because it was remembered.
+  fake.chips[1].bus = 6240;  // 7800 mV
+  const auto next = reader.read();
+  CHECK(next.has_value());
+  if (next) {
+    CHECK_EQ(next->mv, uint16_t(7800));
+    CHECK_EQ(*next->percent, uint8_t(65));
+  }
+  fake.chips[1].bus = 6664;
+  const auto again = reader.read();
+  CHECK(again.has_value() && again->mv == uint16_t(8330));
+}
+
+TEST("Tab5 battery: the chip is identified before any register is written") {
+  // The ES7210 shares 0x40 and 0x41 with the INA226's addresses. A chip that is
+  // not an INA226 is never written, and when neither address answers as one
+  // there is no power port at all.
+  Tab5PowerFake fake = tab5_unit();
+  fake.chips[1].mfr = 0x1234;  // 0x41 answers, but not as an INA226
+  hgp::Tab5PowerReader<Tab5PowerFake> reader(fake);
+  CHECK(!reader.begin());
+  CHECK(!reader.read().has_value());
+  for (const auto& call : fake.calls) CHECK(call.rfind("write:", 0) != 0);
+
+  // The unit's layout: 0x41 is the INA226 and every write goes there, never to
+  // the microphone codec at 0x40.
+  Tab5PowerFake unit = tab5_unit();
+  hgp::Tab5PowerReader<Tab5PowerFake> port(unit);
+  CHECK(port.begin());
+  CHECK(port.read().has_value());
+  for (const auto& call : unit.calls)
+    if (call.rfind("write:", 0) == 0) CHECK(call.find("write:41:") == 0);
+}
+
+TEST("Tab5 battery: the app gets a power port only after the sensor answered, and after the codecs") {
+  const std::string source = __FILE__;
+  const std::string here = source.substr(0, source.find_last_of("/\\") + 1);
+  const std::string candidates[] = {
+      here + "../esp32/main/main.cpp",
+      "../../firmware/esp32/main/main.cpp",
+  };
+  std::ifstream file;
+  std::string text;
+  for (const auto& path : candidates) {
+    file.open(path);
+    if (file) break;
+    file.clear();
+  }
+  CHECK(file.is_open());
+  if (!file.is_open()) return;
+  text.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+  // The port and the reading that gates it are both wired.
+  const size_t register_at = text.find("hal.power = &g_tab5_power_port");
+  CHECK(register_at != std::string::npos);
+  const size_t read_at = text.rfind("g_tab5_power.read()", register_at);
+  CHECK(read_at != std::string::npos && read_at < register_at);
+  // The reading is mapped onto the contract, and the two unmeasurable fields are
+  // left unknown instead of being filled in.
+  CHECK(text.find("status.battery_mv = ") != std::string::npos);
+  CHECK(text.find("status.battery_present = ") != std::string::npos);
+  CHECK(text.find("status.charging") == std::string::npos);
+  CHECK(text.find("status.external_power") == std::string::npos);
+  CHECK(text.find("can_power_off() const override { return false; }") != std::string::npos);
+  // 0x40 is the microphone codec's own address, so the battery handles are added
+  // only after the codecs have theirs.
+  const size_t codec_at = text.find("g_codec.begin(board.codec, i2c_bus)");
+  CHECK(codec_at != std::string::npos && codec_at < register_at);
+  // No expander, GPIO or reset inside the adapter: the charger enable pins and
+  // the amplifier are on those chips, and nothing here can reach them.
+  const size_t block_at = text.find("struct Tab5PowerIo");
+  CHECK(block_at != std::string::npos);
+  if (block_at != std::string::npos) {
+    const size_t block_end = text.find("\n};", block_at);
+    CHECK(block_end != std::string::npos && register_at > block_end);
+    if (block_end != std::string::npos && block_end > block_at) {
+      const std::string block = text.substr(block_at, block_end - block_at);
+      CHECK(block.find("0x43") == std::string::npos);
+      CHECK(block.find("0x44") == std::string::npos);
+      CHECK(block.find("gpio") == std::string::npos);
+      // ...and it is a real plain I2C reader, not a stub.
+      CHECK(block.find("i2c_master_transmit_receive") != std::string::npos);
+      CHECK(block.find("i2c_master_transmit(") != std::string::npos);
+    }
+  }
 }

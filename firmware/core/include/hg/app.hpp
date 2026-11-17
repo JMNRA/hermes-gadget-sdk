@@ -436,8 +436,10 @@ class App {
   void enter_face_down();
   void leave_face_down();
   json::Value power_value() const;
-  // The resting clock (app_power.cpp): it shows on an online, paired Ready
-  // screen once `clock_after_ms_` of rest has passed without anything on it.
+  // The resting clock (app_power.cpp): it shows once `clock_after_ms_` of rest has
+  // passed without anything else on the screen, over Ready and over the Offline,
+  // Connecting and Pairing screens of a link that is not up. Boot is the one
+  // screen it never covers.
   bool clock_blocked() const;
   void clock_tick();
   json::Value status_value() const;

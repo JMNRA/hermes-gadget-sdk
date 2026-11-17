@@ -6945,7 +6945,8 @@ TEST("clock: it needs the time, and the settings body says so until then") {
   r.fake.wall_ok = true;
   r.advance(6000);
   CHECK(r.app.screen() == hg::Screen::Clock);
-  // It also needs a paired session: the pairing screen keeps it away.
+  // The pairing screen is a link state like any other: an idle gadget with the
+  // time rests on the clock over it, and the pairing screen is back on a tap.
   Rig pairing;
   pairing.fake.backlight = true;
   pairing.fake.wall = kWallSaturday;
@@ -6953,9 +6954,9 @@ TEST("clock: it needs the time, and the settings body says so until then") {
   pairing.bring_online(false);
   CHECK_EQ(pairing.app.console("set clock 5"), std::string("@ok clock"));
   pairing.advance(10000);
-  CHECK(pairing.app.screen() == hg::Screen::Pairing);
-  CHECK(!pairing.app.clock_showing());  // no dim face behind the pairing screen
-  CHECK_EQ(pairing.fake.brightness, 100);
+  CHECK(pairing.app.screen() == hg::Screen::Clock);
+  CHECK_EQ(pairing.fake.brightness, 70);
+  CHECK(pairing.app.status_json().find("\"screen\":\"clock\"") != std::string::npos);
   // A board without a display never runs the clock at all.
   Rig blind;
   blind.hal.display = nullptr;
@@ -6966,6 +6967,123 @@ TEST("clock: it needs the time, and the settings body says so until then") {
   blind.advance(6000);
   CHECK(!blind.app.clock_showing());
   CHECK(blind.app.status_json().find("\"screen\":\"clock\"") == std::string::npos);
+}
+
+TEST("clock: an idle gadget with the time rests on the clock with no gateway at all") {
+  // Never configured: no Wi-Fi, no gateway reached, no pairing. Before this, the
+  // Offline screen was all this gadget could ever show.
+  Rig offline(Rig::touch_profile());
+  offline.fake.backlight = true;
+  offline.app.begin();
+  offline.fake.wall = kWallSaturday;
+  offline.fake.wall_ok = true;
+  CHECK_EQ(offline.app.console("set clock 5"), std::string("@ok clock"));
+  offline.advance(3000);
+  CHECK(offline.app.screen() == hg::Screen::Offline);  // the link screen holds the rest
+  offline.advance(3000);
+  CHECK(offline.app.screen() == hg::Screen::Clock);
+  CHECK_EQ(offline.app.model().clock_time, std::string("09:41"));
+  CHECK_EQ(offline.fake.brightness, 70);
+  CHECK(offline.app.status_json().find("\"screen\":\"clock\"") != std::string::npos);
+  // A tap ends it and the Offline screen is back, lit, exactly as before.
+  hg::TouchGestures touch(offline.app);
+  touch.update(true, 160, 120, offline.fake.clock);
+  CHECK(offline.app.screen() == hg::Screen::Offline);
+  CHECK_EQ(offline.fake.brightness, 100);
+  touch.update(false, 0, 0, offline.fake.clock + 30);
+  CHECK(offline.app.screen() == hg::Screen::Offline);
+  // A gateway that never answers is no different: connecting rests on the clock too.
+  Rig connecting;
+  connecting.fake.backlight = true;
+  connecting.app.begin();
+  connecting.app.on_network(true, "test-wifi");
+  connecting.advance(1000);
+  CHECK(connecting.app.screen() == hg::Screen::Connecting);
+  connecting.fake.wall = kWallSaturday;
+  connecting.fake.wall_ok = true;
+  CHECK_EQ(connecting.app.console("set clock 5"), std::string("@ok clock"));
+  connecting.advance(6000);
+  CHECK(connecting.app.screen() == hg::Screen::Clock);
+  CHECK_EQ(connecting.fake.brightness, 70);
+}
+
+TEST("clock: a dropped link does not wake the resting clock away") {
+  // The screen timeout is on, so every power tick runs its wake step, and a link
+  // that drops is no longer settled. That step must leave a resting clock alone:
+  // a wake there ends the rest and lights the link screen instead.
+  Rig r;
+  r.fake.backlight = true;
+  r.bring_online(true);
+  CHECK_EQ(r.app.console("set screen_timeout 30"), std::string("@ok screen_timeout"));
+  r.fake.wall = kWallSaturday;
+  r.fake.wall_ok = true;
+  CHECK_EQ(r.app.console("set clock 5"), std::string("@ok clock"));
+  r.advance(6000);
+  CHECK(r.app.screen() == hg::Screen::Clock);
+  CHECK(r.app.clock_showing());
+  CHECK_EQ(r.fake.brightness, 70);
+  r.app.on_transport_closed("bye");
+  r.advance(2000);
+  CHECK(r.app.screen() == hg::Screen::Clock);  // the link screen waits behind it
+  CHECK(r.app.clock_showing());
+  CHECK_EQ(r.fake.brightness, 70);
+  // An input still ends the rest: the link screen comes back, lit.
+  r.app.on_button(hg::Button::Talk, true);
+  r.app.on_button(hg::Button::Talk, false);
+  CHECK(r.app.screen() == hg::Screen::Connecting);
+  CHECK_EQ(r.fake.brightness, 100);
+}
+
+TEST("clock: no time, the menu open or a question up still keep it away offline") {
+  // Without a valid time of day the Offline screen keeps the panel, lit.
+  Rig no_time;
+  no_time.fake.backlight = true;
+  no_time.app.begin();
+  CHECK_EQ(no_time.app.console("set clock 5"), std::string("@ok clock"));
+  no_time.advance(12000);
+  CHECK(no_time.app.screen() == hg::Screen::Offline);
+  CHECK(!no_time.app.clock_showing());
+  CHECK_EQ(no_time.fake.brightness, 100);
+  // The settings menu owns the screen, as it does online.
+  Rig menu;
+  menu.fake.backlight = true;
+  menu.app.begin();
+  menu.fake.wall = kWallSaturday;
+  menu.fake.wall_ok = true;
+  CHECK_EQ(menu.app.console("set clock 5"), std::string("@ok clock"));
+  menu.advance(6000);
+  CHECK(menu.app.screen() == hg::Screen::Clock);
+  CHECK(menu.app.open_settings());
+  menu.advance(1000);
+  CHECK(menu.app.screen() == hg::Screen::Settings);
+  CHECK(!menu.app.clock_showing());
+  CHECK_EQ(menu.fake.brightness, 100);
+  menu.app.close_settings();
+  for (int i = 0; i < 40 && menu.app.screen() != hg::Screen::Clock; ++i) menu.advance(1000);
+  CHECK(menu.app.screen() == hg::Screen::Clock);
+  // A question waiting for an answer keeps it away too. (A question can only
+  // arrive over a session, so this one is online.)
+  Rig prompt;
+  prompt.fake.backlight = true;
+  prompt.bring_online(true);
+  prompt.fake.wall = kWallSaturday;
+  prompt.fake.wall_ok = true;
+  CHECK_EQ(prompt.app.console("set clock 5"), std::string("@ok clock"));
+  prompt.server(R"({"type":"prompt","id":"q1","title":"Allow?","text":"rm -rf build"})");
+  CHECK(prompt.app.screen() == hg::Screen::Prompt);
+  prompt.advance(12000);
+  CHECK(prompt.app.screen() == hg::Screen::Prompt);
+  CHECK(!prompt.app.clock_showing());
+  CHECK_EQ(prompt.fake.brightness, 100);
+  // A board with no display never runs it at all, offline included.
+  Rig blind;
+  blind.hal.display = nullptr;
+  blind.fake.wall = kWallSaturday;
+  blind.fake.wall_ok = true;
+  blind.app.begin();
+  CHECK_EQ(blind.app.console("set clock 5"), std::string("@ok clock"));
+  blind.advance(12000);
+  CHECK(!blind.app.clock_showing());
 }
 
 TEST("clock: after a rest it shows at 70% of the brightness setting") {
@@ -7151,10 +7269,14 @@ TEST("clock: it gives way to whatever needs the screen, and comes back after a n
   r.hold_still(0, 0, 1000, 500);  // turn it back over
   CHECK_EQ(r.fake.brightness, 100);
   showing();
-  // A dropped connection ends a showing clock; its screens take over, lit.
+  // A dropped connection no longer takes a resting clock away: the link screen
+  // waits behind it, and any input brings that screen back, lit.
   r.app.on_transport_closed("bye");
   r.advance(300);
-  CHECK(!r.app.clock_showing());
+  CHECK(r.app.screen() == hg::Screen::Clock);
+  r.app.on_button(hg::Button::Talk, true);
+  r.app.on_button(hg::Button::Talk, false);
+  CHECK(r.app.screen() == hg::Screen::Connecting);
   CHECK_EQ(r.fake.brightness, 100);
   // A fatal server error keeps the Error screen up, also lit, with no clock under it.
   Rig err;

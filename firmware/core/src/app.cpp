@@ -3035,26 +3035,30 @@ void App::update_model() {
         m.caption_lines = 2;
       }
     }
-    if (clock_showing_) {
-      // The resting clock owns the whole panel: the time, the date and the mascot.
-      m.screen = Screen::Clock;
-      m.clock_time = clock_time_text(wall_, clock_24h_);
-      m.clock_date = tr(Msg::ClockDate,
-                        {tr(static_cast<Msg>(static_cast<int>(Msg::WeekdaySun) + std::min<unsigned>(wall_.weekday, 6))),
-                         tr(static_cast<Msg>(static_cast<int>(Msg::MonthJan) + std::clamp<int>(wall_.month, 1, 12) - 1)),
-                         std::to_string(wall_.day)});
-      m.clock_minute = wall_.minute;
-      m.clock_second = wall_.second;
-      m.hero = false;
-      m.name_target = false;
-      m.hint.clear();
-      m.detail.clear();
-      m.body.clear();
-    }
   }
   bool keeps_detail = m.screen == Screen::Pairing || m.screen == Screen::Boot || m.screen == Screen::Prompt ||
                       m.screen == Screen::Choice ||
                       m.screen == Screen::Profiles;
+  // It rests over the idle home and link screens, not only Ready: the resting clock
+  // owns the whole panel, the time, the date and the mascot. Anything that took the
+  // panel from the user above stays up until clock_tick ends the rest.
+  const bool clock_rests = m.screen == Screen::Ready || m.screen == Screen::Offline ||
+                           m.screen == Screen::Connecting || m.screen == Screen::Pairing;
+  if (clock_showing_ && clock_rests) {
+    m.screen = Screen::Clock;
+    m.clock_time = clock_time_text(wall_, clock_24h_);
+    m.clock_date = tr(Msg::ClockDate,
+                      {tr(static_cast<Msg>(static_cast<int>(Msg::WeekdaySun) + std::min<unsigned>(wall_.weekday, 6))),
+                       tr(static_cast<Msg>(static_cast<int>(Msg::MonthJan) + std::clamp<int>(wall_.month, 1, 12) - 1)),
+                       std::to_string(wall_.day)});
+    m.clock_minute = wall_.minute;
+    m.clock_second = wall_.second;
+    m.hero = false;
+    m.name_target = false;
+    m.hint.clear();
+    m.detail.clear();
+    m.body.clear();
+  }
   if (!notice_.empty() && !keeps_detail) m.detail = notice_;
   if (m.screen == Screen::Ready && m.hero && power_status_ && power_status_->battery_percent &&
       *power_status_->battery_percent <= 10 && power_status_->external_power == false)

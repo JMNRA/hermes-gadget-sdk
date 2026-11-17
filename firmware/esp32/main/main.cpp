@@ -477,6 +477,90 @@ bool tab5_begin_amplifier(i2c_master_bus_handle_t bus) {
   }
   return true;
 }
+
+// The Tab5 battery monitor (panel_tab5.hpp): the INA226 the BSP README names, at
+// 0x41 on this unit (measured: 8330 mV on USB with the pack fitted, 1213 mV with
+// the pack disconnected). Its only device handles are those two candidate
+// addresses and its only write is that chip's own config register, so the
+// charger enable pins and the amplifier -- both on the expanders -- are
+// unreachable from here, and the audio codec's registers are never touched.
+struct Tab5PowerIo {
+  i2c_master_dev_handle_t chip[2] = {nullptr, nullptr};
+
+  i2c_master_dev_handle_t device(uint8_t address) const {
+    if (address == hgp::kTab5BattAddressA) return chip[0];
+    if (address == hgp::kTab5BattAddressB) return chip[1];
+    return nullptr;
+  }
+  // Big endian on the wire, as the INA226's register map is.
+  bool read16(uint8_t address, uint8_t reg, uint16_t& value, uint32_t timeout_ms) {
+    i2c_master_dev_handle_t dev = device(address);
+    if (!dev) return false;
+    uint8_t bytes[2] = {0, 0};
+    if (i2c_master_transmit_receive(dev, &reg, 1, bytes, 2, static_cast<int>(timeout_ms)) != ESP_OK) return false;
+    value = static_cast<uint16_t>((bytes[0] << 8) | bytes[1]);
+    return true;
+  }
+  bool write16(uint8_t address, uint8_t reg, uint16_t value, uint32_t timeout_ms) {
+    i2c_master_dev_handle_t dev = device(address);
+    if (!dev) return false;
+    const uint8_t bytes[3] = {reg, static_cast<uint8_t>(value >> 8), static_cast<uint8_t>(value & 0xff)};
+    return i2c_master_transmit(dev, bytes, sizeof(bytes), static_cast<int>(timeout_ms)) == ESP_OK;
+  }
+  void delay(uint32_t ms) { vTaskDelay(pdMS_TO_TICKS(ms) + 1); }
+  void print(const char* line) { ESP_LOGI(TAG, "%s", line); }
+};
+Tab5PowerIo g_tab5_power_io;
+hgp::Tab5PowerReader<Tab5PowerIo> g_tab5_power(g_tab5_power_io);
+
+// hal.power for this board. Only the bus voltage is measured, so `charging` and
+// `external_power` stay unknown: the shunt current read about 0.1 mA, far too
+// little to tell a charge from a discharge. Unknown already counts as plugged in
+// for the doze and Wi-Fi-retry decisions. A percentage here is a voltage
+// estimate, not a fuel gauge.
+class Tab5PowerPort : public hg::Power {
+ public:
+  explicit Tab5PowerPort(hgp::Tab5PowerReader<Tab5PowerIo>& reader) : reader_(reader) {}
+  std::optional<hg::PowerStatus> read() override {
+    const auto reading = reader_.read();
+    if (!reading) return std::nullopt;  // a failed read is never the previous value
+    hg::PowerStatus status;
+    status.battery_mv = reading->mv;
+    status.battery_present = reading->present;
+    if (reading->percent) status.battery_percent = *reading->percent;
+    return status;
+  }
+  // No power key and no supply control on this board: the Power Off item stays
+  // out of the settings list instead of failing when it is chosen.
+  bool can_power_off() const override { return false; }
+  bool power_off() override { return false; }
+
+ private:
+  hgp::Tab5PowerReader<Tab5PowerIo>& reader_;
+};
+Tab5PowerPort g_tab5_power_port(g_tab5_power);
+
+// Adds the two candidate handles and asks the chip who it is before anything is
+// written. The handles are released again when no INA226 answers, so the bus is
+// left as it was found.
+bool tab5_begin_power(i2c_master_bus_handle_t bus) {
+  if (!bus) return false;
+  const uint8_t addresses[2] = {hgp::kTab5BattAddressA, hgp::kTab5BattAddressB};
+  for (size_t i = 0; i < 2; ++i) {
+    i2c_device_config_t device{};
+    device.device_address = addresses[i];
+    device.scl_speed_hz = hgp::board_config().i2c.hz;
+    if (i2c_master_bus_add_device(bus, &device, &g_tab5_power_io.chip[i]) != ESP_OK)
+      g_tab5_power_io.chip[i] = nullptr;
+  }
+  if (g_tab5_power.begin()) return true;
+  for (i2c_master_dev_handle_t& dev : g_tab5_power_io.chip)
+    if (dev) {
+      i2c_master_bus_rm_device(dev);
+      dev = nullptr;
+    }
+  return false;
+}
 #endif
 
 hgp::Buttons g_buttons;
@@ -982,6 +1066,23 @@ extern "C" void app_main(void) {
     if (board.light_sleep && g_codec.mic_link().switchable) g_codec_speaker.allow_power_down(g_codec.mic_link().format);
   }
   if (hal.speaker) hal.speaker_decoder = &g_opus;  // Opus replies when Hermes offers them
+#if CONFIG_HG_BOARD_M5STACK_TAB5
+  // The battery monitor's handles go on the bus after the codecs, whose own
+  // address is 0x40 and which must get that handle first. The power port is
+  // registered only when the chip identifies itself AND answers a first
+  // conversion: with no reading there is nothing to show, so the board offers
+  // no battery indicator and no battery settings, and the console `batt`
+  // command still reports what each address said.
+  if (peripherals_ready && tab5_begin_power(i2c_bus)) {
+    if (g_tab5_power.read()) {
+      hal.power = &g_tab5_power_port;
+      ESP_LOGI(TAG, "Tab5 battery: INA226 reporting through hal.power (bus voltage estimate, not a fuel gauge)");
+    } else {
+      ESP_LOGW(TAG, "Tab5 battery: the INA226 identified itself but gave no first reading; no battery indicator or "
+                    "battery settings this boot");
+    }
+  }
+#endif
   const bool imu = peripherals_ready && board.imu.enabled && g_motion.begin(board.imu, i2c_bus);
   g_time.begin(board.rtc, i2c_bus, g_storage);
   const bool touch = peripherals_ready && (board.touch.enabled || board.pwr_key.enabled || board.encoder.a >= 0) &&
