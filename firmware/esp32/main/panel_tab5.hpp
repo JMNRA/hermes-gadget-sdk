@@ -61,6 +61,30 @@ inline BoardConfig tab5_config(const char* name) {
   // Measured on this unit: a -40 dBFS tone at volume 40 was silent and the same
   // tone at 75 was audible. The app's stored setting overrides this at startup.
   b.codec.volume = 75;
+  // Clock and motion, both on the shared bus this profile already probes
+  // (0x10 ES8388, 0x14 GT911, 0x43/0x44 PI4IO expanders). This unit's own I2C
+  // scan (console `diag`) put the RX8130CE at 0x32 and the BMI270 at 0x68.
+  //
+  // The RX8130CE holds UTC while its cell has charge. port_time.cpp already
+  // builds that driver for RtcChip::Rx8130 and tolerates an absent or
+  // unanswered chip (it logs and leaves the clock to network time), so nothing
+  // here can keep the gadget from booting without it.
+  b.rtc.enabled = true;
+  b.rtc.chip = RtcChip::Rx8130;
+  b.rtc.addr = 0x32;
+  // The BMI270 gives face-down sleep through the existing motion driver, which
+  // starts the accelerometer only (no gyroscope). The mounting orientation of
+  // this chip is unmeasured, so the axes stay the chip's own: a guessed remap
+  // would make face-down sleep trigger in the wrong position, and the identity
+  // map only risks that the sleep fires on the opposite face. Verify with `diag`
+  // (`motion` while lying screen up and face down) before trusting it.
+  b.imu.enabled = true;
+  b.imu.chip = ImuChip::Bmi270;
+  b.imu.addr = 0x68;
+  // Measured on this unit: lying screen up, the raw chip z reads about -989 mg,
+  // and the face-down rule expects a negative z, so the chip's z is inverted
+  // here. With this sign, screen up is positive and face down is about -989.
+  b.imu.z_sign = -1;
   return b;
 }
 

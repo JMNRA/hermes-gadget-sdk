@@ -1592,6 +1592,45 @@ TEST("Tab5: profile carries the measured ES8388 speaker and ES7210 microphone") 
   CHECK_EQ(b.codec.mic_gain_db, defaults.mic_gain_db);
 }
 
+TEST("Tab5: profile enables the RX8130CE clock and the BMI270 accelerometer") {
+  const auto b = hgp::tab5_config("m5stack-tab5");
+  // The unit's own I2C scan (console `diag`) found an RX8130CE at 0x32 and a
+  // BMI270 at 0x68 on the shared bus (SDA 31, SCL 32). Both ride the existing
+  // ports -- port_time.cpp already builds the Rx8130 driver for this chip and
+  // port_motion.cpp already builds Bmi270 -- so the profile only names the
+  // chips and where they answer.
+  CHECK(b.rtc.enabled);
+  CHECK(b.rtc.chip == hgp::RtcChip::Rx8130);
+  CHECK_EQ(b.rtc.addr, 0x32);
+  CHECK(b.imu.enabled);
+  CHECK(b.imu.chip == hgp::ImuChip::Bmi270);
+  CHECK_EQ(b.imu.addr, 0x68);
+  // Accelerometer only: the Bmi270 driver enables the accel alone (PWR_CTRL
+  // 0x04, pinned in test_bmi270.cpp), and no profile field could ask for more.
+  //
+  // No axis remap. The Tab5's BMI270 mounting orientation is unmeasured, and a
+  // guessed remap would make face-down sleep fire in the wrong position, so the
+  // identity map keeps the chip's own frame: device z below the threshold is
+  // the chip's z below the threshold. App::motion_tick reads only z and the
+  // magnitudes of x and y, so an inverted mounting shows up as sleep on the
+  // wrong face instead of as a wrong tilt.
+  CHECK_EQ(b.imu.x_from, int8_t{0});
+  CHECK_EQ(b.imu.y_from, int8_t{1});
+  CHECK_EQ(b.imu.z_from, int8_t{2});
+  CHECK_EQ(b.imu.x_sign, int8_t{1});
+  CHECK_EQ(b.imu.y_sign, int8_t{1});
+  CHECK_EQ(b.imu.z_sign, int8_t{-1});  // measured on this unit: screen up reads +z
+  // Every other board inherits the unchanged defaults: no clock, no motion
+  // sensor, and the PCF85063/QMI8658 chips at their usual addresses.
+  const hgp::BoardConfig defaults{};
+  CHECK(!defaults.rtc.enabled);
+  CHECK(!defaults.imu.enabled);
+  CHECK(defaults.rtc.chip == hgp::RtcChip::Pcf85063);
+  CHECK(defaults.imu.chip == hgp::ImuChip::Qmi8658);
+  CHECK_EQ(defaults.rtc.addr, 0x51);
+  CHECK_EQ(defaults.imu.addr, 0x6B);
+}
+
 namespace {
 // The Tab5 amplifier's IO contract, on the numbered registers the reviewed
 // off sequence uses: read() and write() reach the 0x43 expander only, and
