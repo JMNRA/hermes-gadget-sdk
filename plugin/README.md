@@ -11,7 +11,7 @@
   This is the Hermes gateway plugin for [Hermes Gadget](https://github.com/Adolanium/hermes-gadget-sdk) devices.
   Hold a button on a small ESP32 board, ask a question, and hear your own Hermes answer.
 
-  <sub>POWERED BY <a href="https://github.com/NousResearch/hermes-agent">HERMES AGENT</a> &nbsp;·&nbsp; COMMUNITY PLUGIN &nbsp;·&nbsp; VERSION 0.5.0</sub>
+  <sub>POWERED BY <a href="https://github.com/NousResearch/hermes-agent">HERMES AGENT</a> &nbsp;·&nbsp; COMMUNITY PLUGIN &nbsp;·&nbsp; VERSION 0.6.0</sub>
 
   <br /><br />
 
@@ -42,8 +42,8 @@ Choose **Hermes Gadget** in setup and restart the gateway when it asks. Then set
 
 | | |
 | --- | --- |
-| **A gateway platform**<br />`gadget`, a WebSocket endpoint devices connect to. Each device is a direct-message chat, so sessions, `/stop`, `/new` and pairing work as on any platform. | **Five agent tools**<br />`gadget_devices` lists connected gadgets, `gadget_display` shows a card on a screen (text, a list, a progress bar or a QR code), `gadget_ask` asks the user to pick one of a few answers there, `gadget_action` runs a device-declared action, such as an LED, relay or camera capture saved as PNG on the gateway, and `gadget_play` plays a sound file or an audio stream on a gadget's speaker. |
-| **A CLI**<br />`hermes gadget info`, `devices`, `pair`, `forget`, `update` and `tile`. | **Over-the-air updates**<br />`hermes gadget update` sends new firmware to a connected gadget. |
+| **A gateway platform**<br />`gadget`, a WebSocket endpoint devices connect to. Each device is a direct-message chat, so sessions, `/stop`, `/new` and pairing work as on any platform. | **Seven agent tools**<br />`gadget_devices` lists connected gadgets, `gadget_display` shows a card on a screen (text, a list, a progress bar or a QR code), `gadget_ask` asks the user to pick one of a few answers there, `gadget_action` runs a device-declared action, such as an LED, relay or camera capture saved as PNG on the gateway, `gadget_play` plays a sound file or an audio stream on a gadget's speaker, `gadget_widget` sets the full-screen widgets a gadget pages through from its home screen, and `gadget_interpret` turns a gadget into an interpreter between two languages. |
+| **A CLI**<br />`hermes gadget info`, `devices`, `pair`, `forget`, `update`, `interpret`, `tile` and `widget`. | **Over-the-air updates**<br />`hermes gadget update` sends new firmware to a connected gadget. |
 | **A dashboard**<br />Gadgets list the agent's sessions (idle, busy or waiting for approval) and status tiles set with `hermes gadget tile`. Session state comes from Hermes's plugin hooks. | **A tab in the Hermes dashboard**<br />**Gadgets** in `hermes dashboard` lists your devices: board, firmware, last seen, and while the gateway runs, online and battery. Read-only. |
 | **A page in Hermes Desktop**<br />**Gadgets** in the desktop app's sidebar: a gadget that runs in the window (hold to talk, or type), pairing approval, a live copy of each device's screen, and buttons to send a card or run a device action. | |
 

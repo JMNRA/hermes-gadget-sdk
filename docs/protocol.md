@@ -72,8 +72,9 @@ Because the id is derived from the key, nobody can claim another device's id wit
 - `caps.ota` (`{"max_size": 2031616}`) means the device installs firmware updates over this connection, up to `max_size` bytes.
 - `caps.card` (`{"v": 1, "items": 12, "qr": 287}`) means the device draws [structured cards](#structured-cards): lists, a progress bar and QR codes. `items` is how many list rows it keeps from one card. `qr` is the longest text, in bytes, that it draws as a code; a device that draws no codes leaves it out.
 - `caps.choice` (`{"v": 1, "options": 6, "title_cols": 25, "title_lines": 4}`) means the device takes a [choice](#choices): a question with up to `options` answers, one of which the user picks. `title_cols` and `title_lines` are the room the question has: that many lines of that many characters. A device may leave them out.
-- `caps.dashboard` (`{"v": 1, "rows": 6}`) means the device draws the [dashboard](#dashboard). `v` is the newest layout it draws, and `rows` is how many lines fit on its screen at once.
+- `caps.dashboard` (`{"v": 2, "rows": 6}`) means the device draws the [dashboard](#dashboard). `v` is the newest layout it draws: 1 is the list of sessions and tiles, and 2 adds [widgets](#widgets). `rows` is how many lines fit on its screen at once.
 - `actions` is the device's tool manifest. Each action has a JSON-Schema `params` object and a `description` written for the model.
+- `caps.interpret: 1` means the device draws [interpreter mode](#interpreter-mode).
 - `caps.profiles: true` means the device can switch Hermes profiles (see [Profiles](#profiles)). `profile` is the profile it used last; it is omitted for `default`.
 - `caps.faces: 1` means the device draws a face that the server sends for the profile answering it (see [Faces](#faces)). `caps.faces: {"v": 2, "px": 192}` means it also draws colour faces, at `px` pixels square (at most 256): the largest size its Ready screen draws the face at. Where Ready has less room, for example with a second caption line while the device offers profiles, the device scales the face down. `"frames": true` in that object means its colour faces also blink and talk. `"thumbs": 96` in that object means the device's profile grid also takes a thumbnail of each offered profile, 96 pixels square (16 to 128); see [Profile thumbnails](#profile-thumbnails). `face` is the `hash` of the face it holds from an earlier connection; it is omitted when it shows the mascot. `thumbs` (`{"ops": "9c1d0e2f3a4b5c6d"}`) names the thumbnails it holds from an earlier connection, profile id to `hash`; it is `{}` when it holds none, and omitted by a device without `caps.faces.thumbs`.
 - `token` is required only when the host sets `GADGET_ACCESS_TOKEN`. A mismatch is rejected with error code `bad_token`.
@@ -211,6 +212,7 @@ The Hermes plugin makes a profile's thumbnail from its `gadget-face.bin` (the id
 | `{"type": "audio.cancel", "id": "a4", "stream": 4, "reason": "too short"}` | Discard the utterance |
 | `{"type": "cancel"}` | Stop the current turn (Hermes `/stop`). With no turn running it only stops the reply audio the server is still sending, and no `/stop` is sent |
 | `{"type": "session.new"}` | Start a fresh conversation (Hermes `/new`). The reference firmware sends it when CANCEL is held for 2 s |
+| `{"type": "interpret.flip"}`, `{"type": "interpret.stop"}` | Switch who speaks next, or leave the mode; see [Interpreter mode](#interpreter-mode). In the mode, `text` and `audio.start` carry `"interpret": true` |
 | `{"type": "prompt.reply", "id": "q1", "answer": "yes"}` | The answer (`yes` or `no`) to a `prompt` |
 | `{"type": "choice.reply", "id": "c1", "index": 1}` | The answer to a `choice`: the picked option, counted from 0. `{"type": "choice.reply", "id": "c1", "cancelled": true}` when the user cancelled; see [Choices](#choices) |
 
@@ -233,6 +235,7 @@ The Hermes plugin makes a profile's thumbnail from its `gadget-face.bin` (the id
 | `{"type": "prompt.close", "id": "q1"}` | The question was withdrawn (timed out or answered elsewhere) |
 | `{"type": "choice", "id": "c1", "title": "Which list?", "options": ["Groceries", "Hardware"], "ttl_s": 60}` | A question with a few answers to pick from; see [Choices](#choices) |
 | `{"type": "choice.close", "id": "c1"}` | The choice was withdrawn |
+| `{"type": "interpret", "on": true, "label": "ES > EN"}` | The device interprets between two languages; see [Interpreter mode](#interpreter-mode) |
 | `{"type": "error", "code": "...", "message": "..."}` | Protocol or auth error; the server usually closes the connection next |
 
 Reply text is already shaped for the device: Markdown is stripped and the text is folded to what its `charset` draws. `"ascii"` gets printable ASCII only. `"latin1"` gets ASCII and Latin-1 (U+00A1 to U+00FF, so accented letters, ¿ ¡ and the like), with no-break spaces as plain spaces; anything else is folded to the nearest letter or dropped. Text is UTF-8 either way, and devices render it as-is. The reference firmware reports `"latin1-cyrillic"`: its font also has the Russian alphabet (U+0410 to U+044F, Ё and ё), which that charset keeps on top of `"latin1"`; other Cyrillic letters are folded or dropped as other scripts are. Firmware from before that reports `"latin1"`, and older firmware still `"ascii"`. A plugin older than `latin1-cyrillic` does not know it and leaves the text unfolded: Russian then shows, but typographic quotes, dashes and emoji that it would have folded draw as `?`. Update the plugin before the firmware. Firmware built with the Chinese font (`HG_CJK_FONT`, [cjk.md](cjk.md)) reports `"cjk"`: Latin-1 plus Chinese, Japanese kana, Korean and fullwidth characters are kept, and the rest folds as for `"latin1"`.
@@ -289,7 +292,7 @@ A device whose screen goes dark (a timeout, the power key, or lying face down) t
 
 - The device sends `{"type": "state", "display_sleeping": true}` when the screen goes dark and `{"type": "state", "display_sleeping": false}` when it lights up. Only changes are sent, as they happen, without the rate limit sensor readings have. A device that connects in the dark says so in `hello` instead.
 - While the screen is dark the server keeps the latest `display` card or image (a newer one replaces an older one, as it would on screen), the latest `status` phrase and the latest `dashboard`, and sends none of them.
-- When the screen lights up, the server sends the held `status` phrase, then the held `dashboard`, then the held card or image. A card or image with a `ttl_s` keeps only the time it has left, counted from when it was sent, and one whose time ran out is dropped. A held status phrase is dropped when its turn ends. A held dashboard is dropped when a newer one goes out first, and is not sent to a device that is unpaired or that reconnects without `caps.dashboard`.
+- When the screen lights up, the server sends the held `status` phrase, then the held `dashboard`, then the held card or image. A card or image with a `ttl_s` keeps only the time it has left, counted from when it was sent, and one whose time ran out is dropped. A held status phrase is dropped when its turn ends. A held dashboard is dropped when a newer one goes out first, and is not sent to a device that is unpaired or that reconnects without `caps.dashboard`, or with a `caps.dashboard.v` below the held one's `v`.
 - What is held survives a reconnect: it goes out once the device connects with its screen lit.
 - Everything else is sent at once: `prompt` and `prompt.close`, `choice` and `choice.close`, `pairing`, turns, transcripts, replies, audio, `notice`, actions and firmware updates. A question or a reply still lights the screen, except while the device lies face down: then it waits for the device to be turned over.
 - A device that never sends `display_sleeping` counts as lit, so nothing is held back for it.
@@ -307,7 +310,7 @@ A device that advertises `caps.dashboard` gets a live summary of Hermes: the age
 
 | Field | Meaning |
 |---|---|
-| `v` | Layout version. A device ignores a dashboard whose `v` it doesn't draw. The server sends only to devices whose `caps.dashboard.v` is at least the version it sends |
+| `v` | Layout version. The server sends each device the newest layout that both know: its `caps.dashboard.v` or the server's own, whichever is lower. A device ignores a dashboard whose `v` is newer than the one it advertised |
 | `sessions[].state` | `idle`, `busy` (a turn is running) or `waiting` (the turn waits for the user to approve a command) |
 | `sessions[].label` | Text to show: the platform and the end of the session id |
 | `tiles[].label`, `tiles[].value` | Text to show for a tile |
@@ -318,6 +321,32 @@ A device that advertises `caps.dashboard` gets a live summary of Hermes: the age
 - The server sends a dashboard when a paired device connects, and again only when something in it changes. An unpaired device gets none.
 - A dashboard is data, not a screen takeover: the device keeps showing what it showed. The reference firmware opens it with CANCEL (a swipe down on touch boards) on the idle screen and closes it with CANCEL again. Talking, a question, a card or an image take the screen over. It forgets the dashboard when the connection drops, and the next connection sends it again.
 - While the screen is dark, only the latest dashboard is kept; see [Screen sleep](#screen-sleep).
+
+#### Widgets
+
+Layout 2 adds `widgets` to the same message: full-screen pages of data that the owner or the agent sets on the host (`hermes gadget widget`, the `gadget_widget` tool). The device needs no network access for them; every value comes from the host.
+
+```json
+{"type": "dashboard", "v": 2, "sessions": [], "tiles": [],
+ "widgets": [{"id": "office", "kind": "value", "label": "Office", "value": "21.5", "unit": "C", "state": "ok"},
+             {"id": "backup", "kind": "progress", "label": "Backup", "percent": 62},
+             {"id": "today", "kind": "list", "label": "Today", "items": ["09:00 Standup", "11:30 Dentist"]},
+             {"id": "playing", "kind": "headline", "label": "Now playing", "title": "Blue in Green", "text": "Miles Davis"}]}
+```
+
+| `kind` | Fields | What the device draws |
+|---|---|---|
+| `value` | `value`, optional `unit` | The value as large as fits, the unit beside it |
+| `progress` | `percent`, a whole number from 0 to 100 | The percentage over a bar |
+| `list` | `items`, up to 4 strings | One item per line |
+| `headline` | `title`, optional `text` | The title large, the text under it |
+
+- Every widget has a `label`, a small heading, and may have a `state`: `ok`, `warn` or `bad`. The state colours the value, the bar or the title green, yellow or red; a list ignores it.
+- At most 8 widgets, in the order the host set them. Text is shaped like the rest of the dashboard, and the device cuts what still doesn't fit its screen.
+- `widgets` is part of the snapshot: a message without it, or with an empty list, removes the widgets the device held. A device skips a widget whose `kind` it doesn't know, and one with nothing to draw: a `value` without a `value`, a `progress` whose `percent` is not a number, a `list` without a text item, a `headline` without a `title`. The reference firmware keeps 64 characters of each text.
+- A device that advertises `caps.dashboard.v` 1 gets a layout 1 message. The server adds each widget to `tiles` as one line (the value and unit, the percentage, the first list item or the title) while fewer than 8 tiles are in use, so older firmware shows the same data on its list.
+- Widgets are data, like the rest of the dashboard: they never take the screen. The reference firmware asks for layout 2 only on boards that can page widgets (a touchscreen, Up and Down buttons, or a knob). From the idle screen, Down or a swipe from left to right opens the first widget; the same again shows the next, and past the last one the idle screen returns. Up or a swipe from right to left goes back. CANCEL closes them. A turn or a reply closes them too, so that it is shown.
+- The screen-sleep rules apply unchanged: the held dashboard carries its widgets, and a held layout 2 dashboard is not sent to a connection that advertises only layout 1.
 
 ### Questions
 
@@ -348,6 +377,27 @@ A device that sends `caps.choice` also takes a question with a few answers. The 
   - TALK and CANCEL alone: CANCEL moves to the next row, TALK answers, and a last row, Cancel, cancels.
 
   A board with only a TALK button and no touchscreen sends no `caps.choice`.
+
+### Interpreter mode
+
+In interpreter mode Hermes translates what is said to the device into another language instead of answering it. To the device the turn is an ordinary one: `turn.start`, `transcript` with what was said, `reply` with the translation, reply audio, `turn.end`.
+
+The person using the device in this mode may not be its owner, so both sides keep the mode from ending unnoticed.
+
+- `caps.interpret: 1` in `hello` means the device draws the mode and marks what it sends from it. The reference firmware announces it when it has a screen. The server sends the messages below to every device; one that does not know them ignores them and shows each translation as a reply.
+- `{"type": "interpret", "on": true, "label": "ES > EN"}` (server → device) turns the mode on, or updates it. `label` is short ASCII text that names the languages: here the next recording is taken as Spanish and translated into English. The server sends the message again when the speaker switches, which is right after each `reply`.
+- `{"type": "interpret", "on": false}` (server → device) turns it off.
+- After every `welcome` to a paired device the server sends one of the two, so the device knows the mode from the server's word and not from its own memory. The device keeps the mode through a lost connection until then. It also leaves the mode when it is unpaired.
+- A `text` or an `audio.start` sent while the device is in the mode carries `"interpret": true`. A recording keeps the mark it began with: one that is sent again after a lost connection carries it even if the mode has ended since. The server never answers a marked message. It translates it while the mode is on; otherwise it drops it and sends `interpret` with `on: false`, a `turn.end` with an empty `turn` and outcome `cancelled`, and a `notice`.
+- `{"type": "interpret.flip"}` (device → server) asks the server to switch who speaks next. The server answers with a new `interpret` message, and ignores the request during a translation. The device shows the new label only when that message arrives.
+- `{"type": "interpret.stop"}` (device → server) asks to leave the mode. The server stops a translation under way and answers as for a dropped message, whether or not the mode was still on. A device in the mode sends this in place of `session.new`. From firmware that does not know it, the server takes `session.new` the same way while the mode is on.
+- `cancel` during a translation stops it with a `turn.end` of outcome `cancelled`. The speaker switches when the `reply` is sent: a `cancel` before it leaves the speaker as it was, and one during the speech comes after the switch.
+- While the mode is on the server sends the device no `prompt` and ignores a `prompt.reply`. It sends no `choice` either, withdraws one that is on the screen when the mode starts (`choice.close`), and ignores a `choice.reply`.
+- A device that draws the mode shows no `prompt` and no `choice` in it. When `interpret` turns the mode on, the reference firmware takes a question or a choice off its screen without sending an answer, and it ignores one that arrives while the mode is on. When the mode starts it also clears the last reply and transcript, so the owner's last exchange is not shown under the label or brought back with UP, and closes a card, an image, the dashboard or the profile list. A later `interpret` message with a new label leaves the translation on the screen.
+
+The reference firmware shows `label` as the headline of the idle screen and of the reply, also while the translation is spoken: the label names who speaks next, and that person may answer before the speech ends. It draws the translation one text size larger when the whole text fits the screen that way, with the `transcript` above it at the usual size. A short CANCEL press on the idle screen sends `interpret.flip`, in place of opening the dashboard. Holding CANCEL counts down and sends `interpret.stop`.
+
+Translations are shaped like replies. When the device's `charset` does not cover the translation's script, the server sends a line in place of the text, or a note under what is left of it; see [Interpreter mode](hermes-integration.md#interpreter-mode).
 
 ### Device actions
 

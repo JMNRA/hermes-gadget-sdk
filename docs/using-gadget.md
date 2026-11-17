@@ -9,7 +9,9 @@ Wait for the device to show Ready. On the LCD board, BOOT is TALK and PLUS is CA
 | Read a spoken reply in full before it ends | Tap the screen, or press Up or Down |
 | Discard a recording, close a card, or stop a turn | Tap CANCEL |
 | Start a fresh conversation | Hold CANCEL for two seconds |
+| Translate between two people | See [Interpreter mode](#interpreter-mode) |
 | Open or close the [dashboard](#watch-hermes-sessions-on-the-dashboard) | Tap CANCEL on the idle screen |
+| Page through the [widgets](#glance-at-widgets) | Press Down on the idle screen, or swipe from left to right |
 | Answer a confirmation question | TALK means yes; CANCEL means no |
 | Go back to Ready with the default Hermes profile | Press the TALK key (BOOT on most boards) twice, quickly |
 | Type in the simulator | Enter a message in the text box and press Enter |
@@ -79,6 +81,64 @@ if ping -c1 -W2 nas.lan >/dev/null; then hermes gadget tile set nas up --state o
 
 The device gets a new dashboard only when something on it changes. While the screen is dark, it gets the latest one when the screen lights up. To turn the dashboard off, set `dashboard: false` under `platforms.gadget.extra` ([configuration](hermes-integration.md#configuration)). Boards without a CANCEL button or a touchscreen don't show it.
 
+## Glance at widgets
+
+Widgets are full-screen pages of data that you, a script or the agent set on the Hermes computer: a room's temperature, a backup's progress, the next calendar events, what is playing. The gadget only draws them. It fetches nothing itself.
+
+| Kind | Shows | Set it with |
+|---|---|---|
+| Value | A big value with its unit | `--value 21.5 --unit C` |
+| Progress | A percentage over a bar | `--percent 62` |
+| List | Up to four short lines | `--item "09:00 Standup" --item "11:30 Dentist"` |
+| Headline | A title and a second line | `--title "Blue in Green" --text "Miles Davis"` |
+
+```bash
+hermes gadget widget set office --value 21.5 --unit C --label Office --state ok
+```
+
+```bash
+hermes gadget widget set backup --percent 62 --label Backup --ttl 900
+```
+
+```bash
+hermes gadget widget set today --item "09:00 Standup" --item "11:30 Dentist" --label Today
+```
+
+```bash
+hermes gadget widget set playing --title "Blue in Green" --text "Miles Davis" --label "Now playing" --device kitchen
+```
+
+- The option you give picks the kind. Setting a name again replaces that widget.
+- `--label` is the small heading; without it the name is shown.
+- `--state` colours the value, the bar or the title green (`ok`), yellow (`warn`) or red (`bad`).
+- `--ttl 900` removes the widget after 15 minutes unless it is set again. It is a positive number of seconds.
+- `--device kitchen` sets the widget for one gadget, by name or id. Without it every gadget gets the widget. A gadget's own widget replaces the shared widget of the same name.
+- `hermes gadget widget list` shows the widgets. `hermes gadget widget clear office` removes one, and `hermes gadget widget clear --all` removes all of them; add `--device` for the widgets set for one gadget.
+- A gadget shows up to eight widgets, the shared ones counted with its own. A widget that would give any gadget a ninth is refused, and the message names that gadget; nothing already on a screen is pushed off it. Clear one first.
+- Connected gadgets get a change within a few seconds.
+- `hermes gadget forget` also removes the widgets set for that gadget.
+
+To page through the widgets on the gadget:
+
+| Board | Open and go forward | Go back | Close |
+|---|---|---|---|
+| Touchscreen | Swipe from left to right on the idle screen, and again on each widget | Swipe from right to left | Swipe down |
+| Up and Down buttons, or a knob | Press Down on the idle screen, and again on each widget | Press Up | Tap CANCEL |
+
+Past the last widget the idle screen returns, and so it does when you go back from the first. The dots at the bottom show which widget you are on. Holding or tapping the screen, or TALK, still talks from a widget. A question, a card or an image takes the screen over, and so does a reply from Hermes: a turn that starts by itself, such as a scheduled message, closes the widgets and shows its text. While a question is on screen, a sideways swipe does nothing, and the widget comes back when the question is answered. The other gestures are unchanged: a swipe down on the idle screen opens the sessions list, a swipe from right to left opens the profile grid, and Up brings the last reply back.
+
+A widget left open follows the screen timeout like the sessions list: the screen dims, goes dark and wakes to the idle screen. With the [resting clock](#resting-clock) on, a widget left open rests too: each minute the screen shows the clock face or the next widget in turn, at the clock's lower brightness. Like the clock face, each of them is drawn a few pixels away from where it was the turn before, through nine places, to spare OLED panels. A touch brings back the widget you left. Up or Down pages from the widget on screen; on the clock face's turn they bring back the widget you left. The idle screen's own rest is the clock alone, as before.
+
+Boards with only TALK and CANCEL cannot page, and so do gadgets on firmware older than this feature. They show each widget as a line on the [sessions list](#watch-hermes-sessions-on-the-dashboard), after the tiles and while fewer than eight lines are in use.
+
+A cron job can keep widgets current. [`examples/widgets/system_widgets.py`](../examples/widgets/system_widgets.py) needs only Python: it sets a disk's fill level, the load average and a headline with the host name, each with a `--ttl` so that a job that stops leaves nothing stale. Run it with `--dry-run` to see the commands.
+
+```
+*/5 * * * * python3 /path/to/examples/widgets/system_widgets.py
+```
+
+The agent sets widgets with the `gadget_widget` tool, so "put tomorrow's weather on the kitchen gadget" or a Hermes cron job works too ([agent tools](hermes-integration.md#agent-tools-and-hermes-tool-search)). `dashboard: false` under `platforms.gadget.extra` turns widgets off with the rest of the dashboard.
+
 ## Round screens
 
 On a round display, a thin ring just inside the glass edge shows what the device is doing. It is always on; there is no setting for it. Rectangular screens do not change. The first state that matches wins:
@@ -93,6 +153,50 @@ On a round display, a thin ring just inside the glass edge shows what the device
 - **Starting up and connecting:** an amber comet, one lap every 2.4 seconds.
 
 Anything else shows no ring. A recording, an update or a battery screen takes the ring from a running timer while it lasts, and the timer's arc comes back after it. Screens not in the list, such as settings, cards and the dashboard, still show the timer's arc while a timer runs.
+
+## Interpreter mode
+
+Two people who speak different languages can pass the gadget back and forth. While the mode is on, the gadget does not answer what it hears. It says each thing in the other language and shows the translation in large text, with what was said in small text above it.
+
+Turn it on in one of two ways:
+
+- Ask Hermes, for example "interpret between Spanish and English". The agent uses its `gadget_interpret` tool. The language you name first speaks first.
+- Run a command on the Hermes computer, with the gadget's name or id:
+
+  ```bash
+  hermes gadget interpret kitchen es en
+  ```
+
+A language is a code such as `es`, `en` or `pt-BR`, or an English name such as `Spanish`. The mode knows 54 languages and refuses anything else.
+
+The screen then shows who speaks next and into which language, for example `ES > EN`: the next recording is taken as Spanish and translated into English.
+
+| What you want to do | Control |
+|---|---|
+| Say something to the other person | Hold TALK, speak, and release |
+| Let the same person speak again | Tap CANCEL on the idle screen; the label switches back |
+| Stop a translation | Tap CANCEL while Hermes works on it or speaks it |
+| Leave interpreter mode | Hold CANCEL for two seconds, or run `hermes gadget interpret kitchen off` |
+
+The two people take turns. The label switches as soon as a translation appears, because the gadget changes hands. Each recording is transcribed in the language on the left of the label, so check the label before you speak. A recording transcribed in the wrong language gives a wrong translation: tap CANCEL to switch, and say it again. The mode does not detect who is speaking; [the Hermes side](hermes-integration.md#interpreter-mode) says why.
+
+Text typed in the simulator is translated the same way.
+
+What to expect:
+
+- **The other person cannot make Hermes do anything.** What is said in this mode never reaches the Hermes agent. The plugin sends the words to speech-to-text and then to the model as a request for a translation, with no tools. The model's answer can only be shown and spoken: it cannot run a command, use a tool, or read your conversation or memory.
+- **While the mode is on, the gadget is closed to Hermes in the other direction too.** It shows no approval or confirmation question and takes no answer to one: a question waits until the mode ends, or you answer it on the host or in another chat. A message sent to the gadget, such as a reminder or a cron result, waits until the mode ends; audio and pictures sent to it are refused. A reminder that was shown just before the mode started is not read aloud after it. Device events start no Hermes turn. If you turn the mode on by asking Hermes, the reply to that request, usually "the interpreter is ready", is still shown and spoken.
+- **The mode does not end by accident.** Hermes keeps it on disk, so a gateway restart does not end it, and the gadget keeps it through a lost connection. If Hermes cannot save it, the mode does not start and you are told why. What is typed or recorded in the mode is marked as such by the gadget: if the mode has ended on the Hermes side meanwhile, that is dropped with "Interpreter is off. Say it again." and never answered by Hermes.
+- **What is kept.** A translation is not part of any Hermes session and is not saved to memory. The recording is deleted as soon as it is transcribed, and what was said and its translation are not copied to the live view of the gadget in Hermes Desktop. The words do pass through the speech-to-text, model and text-to-speech providers that your Hermes is configured to use, as everything you say to Hermes does; if a request fails, Hermes may try it again on a fallback provider you configured. The gateway log has one line per translation, without its text. Each sentence is translated by itself: the model does not see the sentences before it.
+- **Your conversation is not touched.** When you leave the mode, the gadget's conversation with Hermes is as you left it.
+- **A spoken request to stop is translated too.** Leave with CANCEL or the command. The command also works while the gadget is switched off or out of reach; the gadget leaves the mode when it next connects. Holding CANCEL needs a connection to Hermes.
+- **The mode ends by itself** after 30 minutes without a translation. The gadget is told and shows "Interpreter off".
+- **CANCEL on the idle screen switches the speaker** instead of opening the [dashboard](#watch-hermes-sessions-on-the-dashboard).
+- **A script the screen can't draw.** The screen draws Latin letters and Russian Cyrillic, and on a [CJK build](cjk.md) also Chinese, Japanese kana and Korean hangul. A translation in any other script, such as Arabic, Hebrew, Greek, Thai or Hindi, or in Chinese, Japanese or Korean on a standard build, is still spoken, and the screen shows a line such as "(Arabic: spoken only. This screen can't show its script.)". When only some characters are missing, such as the Ukrainian letters the font lacks or Japanese words between Latin ones, the screen shows the rest with "(Some characters can't be shown on this screen.)" under it. On a gadget that does not speak, because it has no speaker or voice is off, such a translation is lost: the screen says that it can't show the script, and the command warns about it when you start the mode.
+- **Long answers are cut.** A translation is limited to about 800 characters, and one that takes more than 45 seconds fails with "Translation failed".
+- **The speech uses Hermes's one text-to-speech voice.** Choose a provider and voice that speak both languages; a voice made for one language reads the other badly.
+- **Which settings translate.** The model, speech-to-text and text-to-speech settings are those of the Hermes profile that runs the gadget platform, usually `default`, whichever profile the gadget was talking to. This was tested on a gateway that serves one profile only.
+- **Older firmware.** Firmware from before this feature still interprets, and shows each translation as an ordinary reply, without the label or the large text. It does not mark what it sends, so the protection against a mode that ended meanwhile rests on the Hermes side alone. Update the gadget before you hand it to someone.
 
 ## Timers
 

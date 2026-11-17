@@ -1,7 +1,7 @@
 name: gadget
 label: Hermes Gadget
 kind: platform
-version: 0.5.0
+version: 0.6.0
 manifest_version: 2
 api_version: 1
 requires_hermes: ">=0.21.6"  # first Hermes release with the commit CI tests against (plugin/compat.py)
@@ -20,6 +20,8 @@ provides_tools:
   - gadget_ask
   - gadget_action
   - gadget_play
+  - gadget_widget
+  - gadget_interpret
 provides_hooks:  # session state for the device's dashboard (dashboard.SessionBoard.HOOKS)
   - on_session_start
   - pre_llm_call

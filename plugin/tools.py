@@ -1,5 +1,5 @@
 """Agent tools for gadgets: inspect devices, show content on a screen, ask the
-user to pick an answer there, invoke device-declared actions.
+user to pick an answer there, invoke device-declared actions, turn a gadget into an interpreter.
 
 Schemas are static (prompt caching); what a device can do is discovered at run
 time through ``gadget_devices`` and the per-device context Hermes receives with
@@ -121,6 +121,62 @@ PLAY_SCHEMA = {
                        "description": "Loudness of this playback, 1-100 percent of the source's level. Default 100. "
                                       "The speaker's own volume is the device's speaker.volume action."},
             "title": {"type": "string", "description": "Optional short name shown on the screen."},
+            "device": _DEVICE_PARAM,
+        },
+        "required": [],
+    },
+}
+
+
+WIDGET_SCHEMA = {
+    "name": "gadget_widget",
+    "description": "Set or clear a full-screen widget on gadgets' home screens: glanceable data the user pages "
+                   "through, which stays until cleared or its ttl runs out. Kinds: 'value' (a big value with a "
+                   "unit, e.g. a temperature), 'progress' (a percent bar), 'list' (up to 4 short lines, e.g. the "
+                   "next calendar events) and 'headline' (a title and a second line, e.g. weather or now "
+                   "playing). Setting a name again replaces that widget. Unlike gadget_display it does not "
+                   "take over the screen. Keep text brief and plain (no Markdown).",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["set", "clear", "list"], "description": "Default: set."},
+            "name": {"type": "string", "description": "The widget's name, e.g. 'weather'. For clear, omit to "
+                                                      "remove every widget of that device scope."},
+            "kind": {"type": "string", "enum": ["value", "progress", "list", "headline"]},
+            "label": {"type": "string", "description": "Small heading above the content. Default: the name."},
+            "value": {"type": "string", "description": "kind=value: the big value, e.g. '21.5'."},
+            "unit": {"type": "string", "description": "kind=value: its unit, e.g. 'C'."},
+            "percent": {"type": "number", "description": "kind=progress: 0 to 100."},
+            "items": {"type": "array", "items": {"type": "string"}, "description": "kind=list: up to 4 lines."},
+            "title": {"type": "string", "description": "kind=headline: the first line."},
+            "text": {"type": "string", "description": "kind=headline: the second line."},
+            "state": {"type": "string", "enum": ["ok", "warn", "bad"], "description": "Colours it green, yellow or red."},
+            "ttl_s": {"type": "number", "description": "Seconds until it disappears unless set again. Give one "
+                                                       "for data that goes stale."},
+            "device": {"type": "string", "description": "Gadget name or device id. Omit for every gadget."},
+        },
+        "required": [],
+    },
+}
+
+
+INTERPRET_SCHEMA = {
+    "name": "gadget_interpret",
+    "description": "Turn a gadget into an interpreter between two languages, or back. While it is on, everything "
+                   "said to that gadget is translated into the other language, spoken and shown. You are not "
+                   "involved: this conversation gets none of it, and a spoken request to stop would be translated "
+                   "too. The two people take turns, the first language first. The user stops it by holding the "
+                   "gadget's cancel control, or you stop it from another chat. After turning it on, say briefly "
+                   "that the interpreter is ready and who speaks first.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "languages": {
+                "type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 2,
+                "description": "The two languages as codes (es, en, pt-BR) or English names; the one that "
+                               "speaks first comes first. Omit when stopping.",
+            },
+            "stop": {"type": "boolean", "description": "true leaves interpreter mode."},
             "device": _DEVICE_PARAM,
         },
         "required": [],
@@ -269,6 +325,10 @@ def gadget_ask(args: dict, **_kw) -> str:
         return _error(err)
     if (err := _usable(session)):
         return _error(err)
+    # In interpreter mode whoever holds the gadget may not be its owner: their tap is not an answer.
+    if getattr(adapter, "interpreting", lambda _device_id: None)(session.device_id) is not None:
+        return _error(f"{session.name} is in interpreter mode and takes no questions; ask in another chat, "
+                      "or after the mode has ended")
     given = args.get("options")
     if not isinstance(given, list) or not 2 <= len(given) <= MAX_CHOICE_OPTIONS:
         return _error(f"options must be a list of 2 to {MAX_CHOICE_OPTIONS} short answers")
@@ -401,6 +461,87 @@ def gadget_play(args: dict, **_kw) -> str:
         "stops": f"at the end, after {max_s / 60:g} minutes, on stop: true, or when the gadget is used"})
 
 
+def gadget_widget(args: dict, **_kw) -> str:
+    from . import dashboard
+
+    adapter = _adapter()
+    if adapter is None or adapter.hub is None:
+        return _error("gadget hub is not running in this process")
+    store = getattr(adapter, "_tiles", None)
+    if store is None:
+        return _error("the gadget dashboard is turned off (platforms.gadget.extra.dashboard)")
+    device, where = None, "every gadget"
+    ref = str(args.get("device") or "").strip()
+    if ref:  # an enrolled gadget, connected or not: it gets the widget when it next connects
+        known = adapter.hub.store.devices()
+        matches = [d for d, rec in known.items() if d == ref or (rec.get("name") or "").lower() == ref.lower()]
+        if len(matches) != 1:
+            names = ", ".join(f"{rec.get('name') or d} ({d})" for d, rec in known.items()) or "none"
+            return _error(f"no single gadget matches {ref!r}; known: {names}")
+        device, where = matches[0], known[matches[0]].get("name") or matches[0]
+    action = str(args.get("action") or "set")
+    name = str(args.get("name") or "").strip()
+    if action == "list":
+        try:
+            return json.dumps({"success": True, "widgets": store.widgets(device), "device": where})
+        except OSError as exc:
+            return _error(f"could not read the widgets: {exc}")
+    if action == "clear":
+        try:
+            cleared = store.clear_widgets(name or None, device=device)
+        except OSError as exc:
+            return _error(f"could not update the widgets: {exc}")
+        adapter._board_changed()  # devices hear of it now rather than at the next look at the file
+        return json.dumps({"success": True, "cleared": cleared, "device": where})
+    if action != "set":
+        return _error("action must be set, clear or list")
+    try:
+        widget = store.set_widget(
+            name, str(args.get("kind") or ""), device=device, label=args.get("label"), value=args.get("value"),
+            unit=args.get("unit"), percent=args.get("percent"), items=args.get("items"), title=args.get("title"),
+            text=args.get("text"), state=args.get("state") or None, ttl_s=args.get("ttl_s"))
+    except ValueError as exc:
+        return _error(str(exc))
+    except OSError as exc:  # the file is locked or unwritable: say so instead of failing the tool call
+        return _error(f"could not save the widget: {exc}")
+    adapter._board_changed()
+    drawing = [s.name for s in adapter.hub.sessions.values()
+               if s.paired and s.dashboard_version and (device is None or s.device_id == device)]
+    return json.dumps({"success": True, "device": where, "widget": name, "shows": dashboard.widget_summary(widget),
+                       "connected_gadgets_showing_it": drawing})
+
+
+def gadget_interpret(args: dict, **_kw) -> str:
+    adapter = _adapter()
+    if adapter is None:
+        return _error("gadget hub is not running in this process")
+    session, err = _resolve(adapter, args.get("device"))
+    if err:
+        return _error(err)
+    if (err := _usable(session)):
+        return _error(err)
+    try:
+        if args.get("stop"):
+            was_on = _run(adapter, adapter.interpret_stop(session.device_id))
+            return json.dumps({"success": True, "device": session.name, "interpreting": False, "was_on": was_on})
+        languages = args.get("languages")
+        if not isinstance(languages, list) or len(languages) != 2:
+            return _error("languages must name two languages, or pass stop: true")
+        from gateway.session_context import get_session_env
+
+        # Asked in this gadget's own chat: the turn asking may still say on it that the mode is on.
+        asked_here = (get_session_env("HERMES_SESSION_PLATFORM") == "gadget" and adapter._device_id(
+            get_session_env("HERMES_SESSION_CHAT_ID") or "") == session.device_id)
+        state = _run(adapter, adapter.interpret_start(session, languages[0], languages[1], asked_here=asked_here))
+    except ValueError as exc:
+        return _error(str(exc))
+    except Exception as exc:
+        return _error(f"could not reach {session.name}: {exc}")
+    return json.dumps({"success": True, "device": session.name, "interpreting": True, **state.describe(),
+                       "leave": "the user holds the gadget's cancel control, or call this tool with stop: true "
+                                "from another chat"})
+
+
 def available() -> bool:
     """Reachability: tools work only in the process hosting the gadget hub."""
     return runtime.any_active()
@@ -413,6 +554,8 @@ def register_tools(ctx) -> None:
         (ASK_SCHEMA, gadget_ask, "🔘"),
         (ACTION_SCHEMA, gadget_action, "🎛️"),
         (PLAY_SCHEMA, gadget_play, "🔊"),
+        (WIDGET_SCHEMA, gadget_widget, "🧩"),
+        (INTERPRET_SCHEMA, gadget_interpret, "🗣️"),
     ):
         ctx.register_tool(
             name=schema["name"], toolset=TOOLSET, schema=schema, handler=handler,

@@ -214,6 +214,19 @@ class App {
   // A tap or a scroll while a spoken reply's latest lines caption the talking face shows its whole text.
   bool show_reply_text();
   bool profile_picker_open() const { return overlay_ == Overlay::Profiles; }
+  // Widgets: pages the host set, one at a time over the whole panel. From the Ready screen DOWN,
+  // or a swipe from left to right, opens the first; the same again shows the next, and past the
+  // last one the Ready screen comes back. UP, or a swipe from right to left, goes back one, and
+  // from the first to Ready. CANCEL (swipe down) closes them.
+  bool widgets_open() const { return overlay_ == Overlay::Widgets; }
+  // A widget is what the screen shows: open, with no question, alarm or alert over it. Only then
+  // does a sideways swipe page them.
+  bool widgets_showing() const { return widgets_open() && model_.screen == Screen::Widget; }
+  // Whether DOWN or a swipe from left to right that starts now opens them: the Ready screen, with widgets.
+  bool widgets_can_open() const;
+  bool open_widgets();
+  // +1 the next widget, -1 the previous; off either end closes them.
+  bool widget_step(int dir);
   bool profile_switch_pending() const { return !profile_pending_.empty(); }
   static constexpr uint32_t kProfileReplyMs = 15000;
   int profile_row_hit(int x, int y) const;
@@ -380,6 +393,7 @@ class App {
   void h_prompt_close(const json::Value& m);
   void h_choice(const json::Value& m);
   void h_choice_close(const json::Value& m);
+  void h_interpret(const json::Value& m);
   void h_dashboard(const json::Value& m);
   void h_ota_offer(const json::Value& m);
   void h_ota_begin(const json::Value& m);
@@ -842,6 +856,16 @@ class App {
   uint32_t cancel_down_at_ = 0;
   std::string status_;
   std::string user_echo_;
+  // Interpreter mode (docs/protocol.md#interpreter-mode): Hermes translates what is said instead of
+  // answering. The label names the languages ("ES > EN"); a short CANCEL press on the idle screen
+  // asks Hermes to switch who speaks next. Only Hermes ends the mode: it outlives a lost connection,
+  // and what is typed or recorded in it says so (`interpret` in `text` and `audio.start`), so Hermes
+  // never takes it for something to answer, even after it has forgotten the mode.
+  bool interpret_ = false;
+  bool rec_interpret_ = false;  // the recording under way or held was made in the mode
+  std::string interpret_label_;
+  void interpret_off();
+  void interpret_text(UiModel& m);  // the translation large, what was said small above it
   int scroll_ = -1;
   uint32_t page_at_ = 0;  // when long text turns its next page
   uint8_t level_ = 0;
@@ -854,7 +878,7 @@ class App {
   uint32_t id_counter_ = 0;
 
   // overlays
-  enum class Overlay : uint8_t { None, Card, Image, Dashboard, Profiles };
+  enum class Overlay : uint8_t { None, Card, Image, Dashboard, Profiles, Widgets };
   Overlay overlay_ = Overlay::None;
   uint32_t overlay_until_ = 0;  // 0 = until dismissed
   std::string card_title_, card_body_;
@@ -876,6 +900,13 @@ class App {
   std::string dash_headline_;
   int dash_scroll_ = 0;
   bool can_open_dashboard() const { return profile_.has_cancel_button || profile_.touch_screen; }
+  // the dashboard's widgets (layout 2), paged with the scroll buttons or sideways swipes; a board
+  // with neither asks for layout 1, where the host lists them as tiles
+  bool can_page_widgets() const { return profile_.has_scroll_buttons || profile_.touch_screen; }
+  std::vector<Widget> widgets_;
+  int widget_index_ = 0;
+  void clock_model(UiModel& m) const;  // makes `m` the resting clock face
+  void turn_takes_screen();  // a turn or a reply closes the widgets: it is shown, not held under them
 
   // a yes/no question from Hermes (confirmations, command approvals)
   std::string prompt_id_, prompt_title_, prompt_text_;

@@ -39,6 +39,7 @@ enum class Screen : uint8_t {
   Camera,     // the device's own camera: a live view, a countdown, and the photo (App::open_camera)
   Setup,
   Dashboard,  // Hermes's sessions and the user's status tiles (docs/protocol.md#dashboard)
+  Widget,     // one of the host's widgets, the whole panel (docs/protocol.md#widgets)
   Profiles,   // the Hermes profiles to choose from: a grid of `dash` (name, id), the page from item `scroll`
   Alarm,      // TIMER DONE: the whole panel until dismissed (App::start_alarm)
   Clock,      // the resting clock face: the time, the date and the mascot (App::clock_tick)
@@ -59,6 +60,21 @@ struct DashRow {
   std::string label, value;
   Tone tone = Tone::Dim;
   bool heading = false;
+};
+
+// A home-screen widget: data the host set, drawn over the whole panel.
+struct Widget {
+  enum class Kind : uint8_t {
+    Value,     // `value` large, `unit` beside it
+    Progress,  // `percent` large over a bar
+    List,      // `items`, one per line
+    Headline,  // `value` (the title) over `text`
+  };
+  Kind kind = Kind::Value;
+  std::string label, value, unit, text;
+  std::vector<std::string> items;
+  uint8_t percent = 0;
+  DashRow::Tone tone = DashRow::Tone::Dim;  // Dim: no state, the plain colours
 };
 
 // One row of the settings list: a small icon, the item's name, and its state at the
@@ -85,6 +101,7 @@ struct UiModel {
   std::string headline;  // header band, next to the indicator
   std::string detail;    // secondary line (status phrase, URL, error)
   std::string body;      // main text (reply, card body)
+  uint8_t body_scale = 0;  // text scale steps the body is drawn above the base (a translation, large)
   std::string code;      // pairing code
   int scroll = -1;       // first visible body line; -1 pins to the end
   uint8_t level = 0;     // microphone level 0..100
@@ -141,6 +158,14 @@ struct UiModel {
   int8_t card_progress = -1;
   const qr::Code* card_qr = nullptr;
   int16_t item_sel = -1;
+  // Widget screen: the widget, its place among `widget_count`, and whether it is the resting
+  // state's turn of it, drawn with the clock's burn-in shift for `clock_minute`.
+  Widget widget;
+  uint8_t widget_index = 0, widget_count = 0;
+  bool widget_rest = false;
+  // The burn-in shift's place in its nine-step cycle, for the clock face and a resting widget;
+  // -1: the clock's own, `clock_minute`.
+  int16_t shift_step = -1;
   // A running timer: thousandths of its length still to go, or -1 for none. The round
   // panel's edge ring and the rectangular top bar's line show it.
   int16_t timer_permille = -1;
@@ -217,8 +242,10 @@ class Ui {
   // A canvas over that area, and a flush of its rows [y0, y1).
   Canvas canvas();
   void flush(int y0, int y1);
-  // Body text rows visible on a text screen for this model (after detail lines).
+  // Body text rows visible on a text screen for this model (after detail lines), and the
+  // characters a body line holds, both at the model's body_scale.
   int body_rows(const UiModel& m) const;
+  int body_cols(const UiModel& m) const;
   // Dashboard rows that fit the content band.
   int dash_rows() const;
   // A structured card: whether the model is one, the lines it has (the body's, then its items) and
@@ -294,6 +321,7 @@ class Ui {
   void draw_top(Canvas& c, const UiModel& m);
   void draw_header(Canvas& c, const UiModel& m);
   void draw_content(Canvas& c, const UiModel& m);
+  int detail_rows(const UiModel& m) const;  // detail lines drawn above the body
   bool draw_qr(Canvas& c, const UiModel& m, int y0, int y1);
   void draw_dashboard(Canvas& c, const UiModel& m, int y0, int y1);
   void draw_card(Canvas& c, const UiModel& m, int y0, int y1);
@@ -358,6 +386,7 @@ class Ui {
   RingBox comet_box(uint16_t was, uint16_t now) const;
   void draw_alarm(const UiModel& m);
   void draw_clock(const UiModel& m);
+  void draw_widget(const UiModel& m);
   void draw_battery_face(const UiModel& m);  // LowBattery, Charging, Charged
   Display& display_;
   DisplayInfo panel_;
@@ -407,7 +436,7 @@ class Ui {
   // The screen that owns the whole panel right now, and the hash of what it drew.
   // Leaving it repaints everything (draw_frame); each face repaints when the flag
   // is not itself, so Clock -> Alarm -> Clock in one minute still redraws.
-  enum class FullFace : uint8_t { None, Alarm, Clock, Battery };
+  enum class FullFace : uint8_t { None, Alarm, Clock, Battery, Widget };
   FullFace full_face_ = FullFace::None;
   uint32_t face_hash_ = 0;
 };
